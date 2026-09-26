@@ -98,6 +98,15 @@ sudo ./build/php-ebpf-tracer \
     -otlp-endpoint localhost:4317
 ```
 
+システムに libbpf を入れずにビルドする場合は、git submodule の libbpf (v1.5.1)
+をビルドして静的リンクする `LIBBPF_BUNDLED=1` を指定します。
+
+```sh
+# 必要: clang, llvm, libelf, zlib, Go 1.24+ (libbpf は不要)
+git submodule update --init             # 未取得なら make が自動で実行します
+make LIBBPF_BUNDLED=1                   # build/libbpf に libbpf.a を作ってから全体をビルド
+```
+
 Collector を立てずに中身を確認したいときは `-otlp-protocol stdout` を使います。
 
 ```sh

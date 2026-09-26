@@ -113,6 +113,34 @@ Collector を立てずに中身を確認したいときは `-otlp-protocol stdou
 sudo ./build/php-ebpf-tracer -binary "$(which php)" -min-duration 0 -otlp-protocol stdout
 ```
 
+## 認証付きで送る (Grafana Tempo / Grafana Cloud)
+
+Basic 認証のパスワード (トークン) は `ps` に出ないよう環境変数でだけ渡します。
+Grafana Cloud の場合、ユーザーはスタックの Instance ID、パスワードは
+`traces:write` スコープを持つ Access Policy トークンです。
+
+```sh
+export PHP_TRACER_OTLP_BASIC_AUTH_USER=123456
+export PHP_TRACER_OTLP_BASIC_AUTH_PASSWORD=glc_xxxxxxxx
+
+# OTLP/HTTP (Grafana Cloud の OTLP gateway)。パスは /v1/traces まで書く
+sudo -E ./build/php-ebpf-tracer -binary "$(which php)" \
+    -otlp-protocol http \
+    -otlp-endpoint https://otlp-gateway-prod-ap-northeast-0.grafana.net/otlp/v1/traces
+
+# OTLP/gRPC (Tempo へ直接)。host:port のときは -otlp-insecure=false で TLS を有効に
+sudo -E ./build/php-ebpf-tracer -binary "$(which php)" \
+    -otlp-protocol grpc \
+    -otlp-endpoint tempo-prod-10-prod-ap-northeast-0.grafana.net:443 \
+    -otlp-insecure=false
+```
+
+Basic 認証以外 (Bearer トークン、マルチテナントの `X-Scope-OrgID` など) は
+`-otlp-header` で渡せます。こちらも `ps` に出したくなければ
+`OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20xxx` のように環境変数で
+渡してください (`-otlp-header` / Basic 認証を指定すると環境変数のヘッダは
+上書きされます)。
+
 ## 主なオプション
 
 | フラグ | 既定値 | 説明 |
@@ -128,7 +156,10 @@ sudo ./build/php-ebpf-tracer -binary "$(which php)" -min-duration 0 -otlp-protoc
 | `-max-spans` | `5000` | 1 リクエストあたりのスパン数上限 |
 | `-trace-functions` | `true` | `false` にすると関数プローブを張らず、リクエストスパンだけにする |
 | `-otlp-protocol` | `grpc` | `grpc` / `http` / `stdout` |
-| `-otlp-endpoint` | (空) | `host:port`。空なら `OTEL_EXPORTER_OTLP_*` 環境変数に従う |
+| `-otlp-endpoint` | (空) | `host:port` か `https://host/path` 形式の URL。URL なら TLS はスキームで決まり、http ではパスがそのまま使われる。空なら `OTEL_EXPORTER_OTLP_*` 環境変数に従う |
+| `-otlp-insecure` | `true` | `host:port` 指定時に TLS を使わない。リモートに送るときは `-otlp-insecure=false` |
+| `-otlp-header` | (なし) | 追加ヘッダ `key=value`。複数指定可 |
+| `-otlp-basic-auth-user` | (空) | Basic 認証のユーザー (`PHP_TRACER_OTLP_BASIC_AUTH_USER`)。パスワードは環境変数 `PHP_TRACER_OTLP_BASIC_AUTH_PASSWORD` からのみ読む |
 | `-service-name` | `php` | `service.name` |
 | `-max-request-age` | `1m` | `request__shutdown` が来ないリクエストのバッファを捨てるまでの時間 |
 

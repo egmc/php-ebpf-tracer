@@ -43,10 +43,12 @@ const instrumentationName = "github.com/egmc/php-ebpf-tracer"
 type Config struct {
 	// Protocol is grpc, http or stdout.
 	Protocol Protocol
-	// Endpoint is host:port for grpc/http. Empty falls back to the standard
+	// Endpoint is host:port or a full URL (scheme://host[:port][/path]) for
+	// grpc/http. With a URL the scheme picks TLS and, for http, the path
+	// replaces the default /v1/traces. Empty falls back to the standard
 	// OTEL_EXPORTER_OTLP_* environment variables.
 	Endpoint string
-	// Insecure disables TLS for grpc/http.
+	// Insecure disables TLS for grpc/http. Ignored when Endpoint is a URL.
 	Insecure bool
 	// Headers are extra OTLP headers, e.g. authentication.
 	Headers map[string]string
@@ -136,10 +138,15 @@ func newSpanExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, er
 
 	case ProtocolGRPC:
 		opts := []otlptracegrpc.Option{}
-		if cfg.Endpoint != "" {
+		switch {
+		case isURL(cfg.Endpoint):
+			opts = append(opts, otlptracegrpc.WithEndpointURL(cfg.Endpoint))
+		case cfg.Endpoint != "":
 			opts = append(opts, otlptracegrpc.WithEndpoint(cfg.Endpoint))
-		}
-		if cfg.Insecure {
+			if cfg.Insecure {
+				opts = append(opts, otlptracegrpc.WithInsecure())
+			}
+		case cfg.Insecure:
 			opts = append(opts, otlptracegrpc.WithInsecure())
 		}
 		if len(cfg.Headers) > 0 {
@@ -150,10 +157,15 @@ func newSpanExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, er
 
 	case ProtocolHTTP:
 		opts := []otlptracehttp.Option{}
-		if cfg.Endpoint != "" {
+		switch {
+		case isURL(cfg.Endpoint):
+			opts = append(opts, otlptracehttp.WithEndpointURL(cfg.Endpoint))
+		case cfg.Endpoint != "":
 			opts = append(opts, otlptracehttp.WithEndpoint(cfg.Endpoint))
-		}
-		if cfg.Insecure {
+			if cfg.Insecure {
+				opts = append(opts, otlptracehttp.WithInsecure())
+			}
+		case cfg.Insecure:
 			opts = append(opts, otlptracehttp.WithInsecure())
 		}
 		if len(cfg.Headers) > 0 {
@@ -165,6 +177,11 @@ func newSpanExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, er
 	default:
 		return nil, fmt.Errorf("unknown OTLP protocol %q", cfg.Protocol)
 	}
+}
+
+// isURL reports whether endpoint carries a scheme rather than being host:port.
+func isURL(endpoint string) bool {
+	return strings.Contains(endpoint, "://")
 }
 
 func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {

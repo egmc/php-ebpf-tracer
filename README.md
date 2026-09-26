@@ -1,0 +1,229 @@
+# php-ebpf-tracer
+
+PHP の DTrace/USDT プローブを eBPF から拾って、リクエスト単位の分散トレースを
+OTLP で送信する自動計装エージェントです。PHP 側にはエクステントションもコード変更も
+不要で、必要なのは `--enable-dtrace` 付きでビルドされた PHP だけです。
+
+```
+  php (--enable-dtrace)                 kernel                    php-ebpf-tracer (Go)
+ ┌──────────────────────┐   uprobe   ┌──────────────┐  ringbuf  ┌────────────────────┐
+ │ php:request__startup │───────────▶│              │           │ event.Decode       │
+ │ php:function__entry  │───────────▶│ php_tracer   │──────────▶│ pipeline.Aggregator│
+ │ php:function__return │───────────▶│ .bpf.o       │  16 MiB   │  (閾値判定)         │
+ │ php:request__shutdown│───────────▶│ shadow stack │           │ otelexport         │
+ └──────────────────────┘            └──────────────┘           └─────────┬──────────┘
+                                                                          │ OTLP
+                                                                          ▼
+                                                              Collector / Jaeger / …
+```
+
+## できること
+
+- **自動計装**: `request__startup` / `request__shutdown` / `function__entry` /
+  `function__return` の 4 プローブに libbpf の USDT サポートでアタッチします。
+- **カーネル内でスパン化**: プロセス (tgid,tid) ごとのシャドウスタックで
+  entry/return を突き合わせ、**完成したスパンだけ**を ring buffer に流します。
+  entry/return をそのまま転送する場合に比べてレコード数が半分になります。
+- **テールサンプリング**: `request__shutdown - request__startup` の差分が
+  `-min-duration` 以上のリクエストだけを OTLP で送信します。遅いリクエストの
+  スパンはすべて残り、速いリクエストは 1 バイトも送信されません。
+- **ID はカーネルで採番**: trace id / span id を BPF 側で生成し、Go 側は
+  そのまま OTel スパンに載せます。
+
+## 動作要件
+
+| 項目 | 要件 |
+| --- | --- |
+| OS | Linux (macOS では後述の Docker 経由で動かします) |
+| カーネル | 5.8 以上 (BPF ring buffer)。BTF は不要です |
+| 権限 | root もしくは `CAP_BPF` + `CAP_PERFMON`。コンテナなら `--privileged` |
+| PHP | `./configure --enable-dtrace` でビルドされたもの |
+| 環境変数 | PHP プロセス側に **`USE_ZEND_DTRACE=1`** (関数プローブに必須) |
+
+### PHP 側で必要な 2 つの準備
+
+**1. `--enable-dtrace` 付きビルド**
+
+ディストリビューション配布の PHP は基本的に `--enable-dtrace` が無効なので、
+`docker/php.Dockerfile` でソースからビルドしています。手元の PHP に
+プローブがあるかは次のコマンドで確認できます。
+
+```sh
+readelf -n "$(which php)" | grep -c 'Provider: php'   # 0 なら未対応
+```
+
+**2. `USE_ZEND_DTRACE=1`**
+
+`php:function__entry` / `php:function__return` は、PHP が起動時に
+`zend_execute_ex` を dtrace 版に差し替えたときだけ発火します。その差し替えは
+起動時の環境変数 `USE_ZEND_DTRACE=1` でのみ有効になります
+(php-src `Zend/zend.c`)。
+
+```sh
+USE_ZEND_DTRACE=1 php-fpm     # あるいは systemd unit / Dockerfile の ENV で
+```
+
+`request__startup` / `request__shutdown` はこの変数なしでも発火するので、
+`-trace-functions=false` でリクエストスパンだけ取る運用なら不要です。
+なお、この変数を有効にすると (トレースしていないときも) 全関数呼び出しが
+ラッパー経由になるため、PHP 側に一定のオーバーヘッドが乗ります。
+
+## クイックスタート (Docker Compose)
+
+PHP (dtrace 有効) + トレーサ + 負荷生成 + Jaeger が一式立ち上がります。
+
+```sh
+docker compose up --build     # PHP のビルドに数分かかります
+open http://localhost:16686   # Service: php-demo
+```
+
+デモアプリのエンドポイントは `/fast` (数百 µs)、`/slow` (約 250 ms)、
+`/random` (0-400 ms)、`/error` (例外)。デフォルトの閾値は 100 ms なので、
+Jaeger には `/slow` と遅い `/random` だけが現れます。
+
+PHP バイナリは named volume 経由で共有し、PHP プロセスもトレーサも
+**同じ inode** を参照するようにしています。uprobe は inode に対して張られるため、
+コンテナごとに overlayfs のコピーを持つと probe が当たりません。
+
+## 手動ビルド (Linux)
+
+```sh
+# 必要: clang, llvm, libbpf >= 1.5 (ヘッダ + ライブラリ), libelf, zlib, Go 1.24+
+make                                    # build/php_tracer.bpf.o と build/php-ebpf-tracer
+sudo ./build/php-ebpf-tracer \
+    -bpf-object build/php_tracer.bpf.o \
+    -binary "$(which php)" \
+    -service-name my-php-app \
+    -min-duration 100ms \
+    -otlp-endpoint localhost:4317
+```
+
+Collector を立てずに中身を確認したいときは `-otlp-protocol stdout` を使います。
+
+```sh
+sudo ./build/php-ebpf-tracer -binary "$(which php)" -min-duration 0 -otlp-protocol stdout
+```
+
+## 主なオプション
+
+| フラグ | 既定値 | 説明 |
+| --- | --- | --- |
+| `-binary` | `/usr/local/bin/php` | USDT ノートを持つ実行ファイル。複数指定可 (`php` と `php-fpm` など) |
+| `-pid` | `-1` | 特定プロセスだけを対象にする。`-1` で全プロセス |
+| `-attach-mode` | `auto` | `global` (pid=-1 で一括) / `scan` (`/proc` を走査して個別アタッチ) / `auto` (global を試して失敗したら scan) |
+| `-scan-interval` | `3s` | scan モードで新しい PHP プロセスを探す間隔 |
+| `-min-duration` | `100ms` | **送信判定の閾値**。`request__shutdown - request__startup` がこれ以上のものだけ送る。`0` で全送信 |
+| `-min-span` | `0` | これより短い関数スパンを送信前に捨てる (子は生存する祖先に付け替え) |
+| `-max-depth` | `32` | この深さより深い呼び出しはスパンにしない |
+| `-bpf-min-func` | `0` | カーネル側で短い関数スパンを捨てる。安価だが子スパンが root 直下に付け替わる |
+| `-max-spans` | `5000` | 1 リクエストあたりのスパン数上限 |
+| `-trace-functions` | `true` | `false` にすると関数プローブを張らず、リクエストスパンだけにする |
+| `-otlp-protocol` | `grpc` | `grpc` / `http` / `stdout` |
+| `-otlp-endpoint` | (空) | `host:port`。空なら `OTEL_EXPORTER_OTLP_*` 環境変数に従う |
+| `-service-name` | `php` | `service.name` |
+| `-max-request-age` | `1m` | `request__shutdown` が来ないリクエストのバッファを捨てるまでの時間 |
+
+## 送信判定 (テールサンプリング) の仕組み
+
+1. `request__startup` でカーネルが trace id / root span id を採番し、
+   per-request state を `requests` ハッシュマップに作ります。
+2. 関数スパンはリクエストが終わるまで **Go 側のメモリにバッファ**されます
+   (`-max-spans` 件まで)。この時点ではまだ何も送信しません。
+3. `request__shutdown` で `ts_end - ts_start` を計算し、`-min-duration` 未満なら
+   バッファごと破棄します。閾値以上なら木構造を組み立てて OTLP に流します。
+
+閾値未満のリクエストではエクスポータもシリアライズも一切走らないため、
+高スループットなアプリでも送信側のコストは遅いリクエストの分だけで済みます。
+
+## アタッチ方式 (global と scan)
+
+PHP バイナリが PIE (`Type: DYN`) の場合、**カーネル 5.15 未満では
+pid を指定しない一括アタッチができません** (libbpf が BPF cookie なしでは
+プロセスのロードベースを解決できないため)。`-attach-mode auto` が既定で、
+まず pid=-1 を試し、拒否されたら `/proc` を走査して 1 プロセスずつ
+アタッチする scan モードに自動で切り替わります。
+
+scan モードでは `-scan-interval` ごとに `/proc/<pid>/exe` の inode を
+対象バイナリと突き合わせ、増えたプロセスにはアタッチし、消えたプロセスの
+link は破棄します。inode で照合しているのでマウント名前空間が違っても
+一致します。コンテナから使う場合はホストの `/proc` が見える必要があるため、
+`pid: host` (compose) もしくは `--pid=host` を付けてください。
+
+scan モードの弱点はスキャン間隔より短命なプロセスを取りこぼすことです。
+php-fpm や `php -S` のような常駐プロセスなら問題になりません。
+短命な CLI プロセスを確実に拾いたい場合はカーネル 5.15 以上を使うか、
+PHP を non-PIE でビルドしてください。
+
+## 設計メモ
+
+**シャドウスタック** — `function__entry` は `frames[depth]` に開始時刻と span id を
+積むだけ、`function__return` がそれを取り出して 1 レコードを ring buffer に書きます。
+関数名・クラス名・行番号は return 側のプローブ引数からそのまま読めるので、
+entry 側で文字列をコピーする必要がありません。
+
+**壊れた木の修復** — `zend_bailout` (fatal error / `exit()`) で巻き戻された場合や
+`-min-span` でスパンを落とした場合、子スパンは親を失います。
+`pipeline.Request.finalize` が生存している最も近い祖先 (なければ root) に
+付け替えるので、木が分断されることはありません。
+
+**時刻** — BPF 側は `bpf_ktime_get_ns()` (CLOCK_MONOTONIC) です。
+起動時に一度だけ CLOCK_MONOTONIC と CLOCK_REALTIME の差分を取り、その
+オフセットで壁時計に変換します (`internal/monoclock`)。オフセットを取り直さない
+ことで、NTP がずれてもトレース間で時刻が飛ばないようにしています。
+
+**CO-RE 不使用** — カーネル構造体を一切参照していないので BTF なしの
+カーネル (Docker Desktop の LinuxKit など) でもそのままロードできます。
+
+## 制限事項
+
+- 対象は **PHP のユーザーランド関数のみ**です。`function__entry` は内部関数
+  (`usleep` 等) では発火しません。
+- `bpf_get_current_pid_tgid()` は初期 PID 名前空間の PID を返します。
+  コンテナ内の PID とは一致しません。`-pid` に渡すのもホスト側の PID です。
+- SIGKILL されたプロセスのカーネル側 state は `-max-request-age` の
+  スイープで回収されます。
+- 関数プローブは呼び出しごとに発火するため、深い再帰や大量の関数呼び出しを行う
+  アプリでは `-max-depth` / `-bpf-min-func` でイベント量を絞ってください。
+
+## リポジトリ構成
+
+```
+bpf/php_tracer.h        BPF と Go で共有するレコードのワイヤフォーマット定義
+bpf/php_tracer.bpf.c    USDT プローブ + シャドウスタック + ring buffer
+internal/event/         ring buffer レコードのデコード (cgo なし)
+internal/bpftracer/     libbpfgo でのロード・アタッチ・ポーリング
+internal/pipeline/      リクエスト単位のバッファリングと閾値判定
+internal/otelexport/    OTel スパン組み立てと OTLP 送信
+internal/monoclock/     CLOCK_MONOTONIC → 壁時計の変換
+cmd/php-ebpf-tracer/    CLI
+docker/                 PHP (dtrace 有効) とトレーサのイメージ
+examples/               デモアプリと負荷生成スクリプト
+```
+
+## トラブルシューティング
+
+**関数スパンが 1 つも出ない (`spans_buffered=0`)**
+PHP プロセスに `USE_ZEND_DTRACE=1` が渡っていません。リクエストスパンだけが
+出ている場合はほぼこれです。
+
+**`attach ... : operation not supported`**
+PIE バイナリ + カーネル 5.15 未満です。`-attach-mode scan` が自動で使われますが、
+コンテナから使う場合は `--pid=host` が必要です。
+
+**`load BPF object: ... permission denied` + verifier のログ**
+カーネルの verifier がプログラムを拒否しています。ログの末尾に理由が出ます。
+`-max-depth` を下げても変わらない場合は BPF プログラム側の修正が必要です。
+
+**`spans_dropped_cap` が増える**
+1 リクエストの関数呼び出しが `-max-spans` を超えています。`-max-depth` を
+下げるか `-max-spans` を上げてください。
+
+**動作確認のワンライナー**
+
+```sh
+# トレーサの統計 (30 秒ごと)
+docker compose logs -f tracer | grep msg=stats
+
+# Jaeger に届いているか
+curl -s 'http://localhost:16686/api/services'
+```

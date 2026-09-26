@@ -1,0 +1,77 @@
+# End-to-end demo: PHP (built with --enable-dtrace) -> eBPF USDT tracer -> OTLP -> Jaeger.
+#
+#   docker compose up --build
+#   open http://localhost:16686   (service "php-demo")
+#
+# The PHP binary is published into a named volume and executed from there, so
+# the tracer container attaches its uprobes to exactly the same inode the PHP
+# process is running.
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+      - "4317:4317"   # OTLP/gRPC
+
+  php:
+    build:
+      context: .
+      dockerfile: docker/php.Dockerfile
+    volumes:
+      - phpdist:/opt/phpdist
+    ports:
+      - "8080:8080"
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /opt/phpdist/bin
+        cp -f /usr/local/bin/php /opt/phpdist/bin/php
+        exec /opt/phpdist/bin/php -S 0.0.0.0:8080 -t /app /app/index.php
+
+  tracer:
+    build:
+      context: .
+      dockerfile: docker/tracer.Dockerfile
+    # eBPF needs CAP_BPF/CAP_PERFMON plus access to the tracing subsystem.
+    privileged: true
+    pid: host
+    volumes:
+      - phpdist:/opt/phpdist
+      - /sys/kernel/debug:/sys/kernel/debug
+    ulimits:
+      memlock: -1
+    depends_on:
+      - php
+      - jaeger
+    entrypoint:
+      - sh
+      - -c
+      - |
+        until [ -x /opt/phpdist/bin/php ]; do echo "waiting for PHP binary..."; sleep 1; done
+        exec php-ebpf-tracer \
+          -binary /opt/phpdist/bin/php \
+          -otlp-protocol grpc \
+          -otlp-endpoint jaeger:4317 \
+          -otlp-insecure \
+          -service-name php-demo \
+          -min-duration 100ms \
+          -max-depth 32 \
+          -log-level info
+
+  loadgen:
+    image: curlimages/curl:8.8.0
+    depends_on:
+      - php
+    volumes:
+      - ./examples/loadgen.sh:/loadgen.sh:ro
+    environment:
+      TARGET: http://php:8080
+      INTERVAL: "1"
+    entrypoint: ["sh", "/loadgen.sh"]
+
+volumes:
+  phpdist:

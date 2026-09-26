@@ -2,6 +2,8 @@ package otelexport
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -135,6 +137,47 @@ func TestExportIsolatesConsecutiveTraces(t *testing.T) {
 		if n != 2 {
 			t.Errorf("trace %s has %d spans, want 2", id, n)
 		}
+	}
+}
+
+// A URL endpoint must keep its path (Grafana Cloud serves OTLP under /otlp)
+// and carry the auth header.
+func TestHTTPEndpointURLKeepsPathAndHeaders(t *testing.T) {
+	ctx := context.Background()
+
+	type hit struct{ path, auth string }
+	hits := make(chan hit, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case hits <- hit{r.URL.Path, r.Header.Get("Authorization")}:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	exp, err := New(ctx, Config{
+		Protocol: ProtocolHTTP,
+		Endpoint: srv.URL + "/otlp/v1/traces",
+		Headers:  map[string]string{"Authorization": "Basic dXNlcjp0b2tlbg=="},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = exp.Shutdown(ctx) })
+
+	exp.Export(&pipeline.Request{TraceIDHi: 1, TraceIDLo: 1, RootSpanID: 1,
+		StartNS: 1_000_000_000, EndNS: 1_100_000_000, URI: "/r", Method: "GET"})
+	if err := exp.ForceFlush(ctx); err != nil {
+		t.Fatalf("ForceFlush: %v", err)
+	}
+
+	got := <-hits
+	if got.path != "/otlp/v1/traces" {
+		t.Errorf("path = %q, want /otlp/v1/traces", got.path)
+	}
+	if got.auth != "Basic dXNlcjp0b2tlbg==" {
+		t.Errorf("Authorization = %q", got.auth)
 	}
 }
 

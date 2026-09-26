@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -61,6 +62,8 @@ type options struct {
 	otlpEndpoint string
 	otlpInsecure bool
 	otlpHeaders  stringList
+	otlpUser     string
+	otlpPassword string
 
 	serviceName      string
 	serviceNamespace string
@@ -112,9 +115,12 @@ func parseFlags() *options {
 	flag.StringVar(&o.otlpProtocol, "otlp-protocol", envOr("PHP_TRACER_OTLP_PROTOCOL", "grpc"),
 		"OTLP transport: grpc, http or stdout")
 	flag.StringVar(&o.otlpEndpoint, "otlp-endpoint", os.Getenv("PHP_TRACER_OTLP_ENDPOINT"),
-		"OTLP endpoint as host:port (empty = use the OTEL_EXPORTER_OTLP_* environment variables)")
-	flag.BoolVar(&o.otlpInsecure, "otlp-insecure", true, "disable TLS towards the OTLP endpoint")
+		"OTLP endpoint as host:port or a full URL such as https://host/otlp (empty = use the OTEL_EXPORTER_OTLP_* environment variables)")
+	flag.BoolVar(&o.otlpInsecure, "otlp-insecure", true,
+		"disable TLS towards a host:port OTLP endpoint (a URL endpoint takes TLS from its scheme)")
 	flag.Var(&o.otlpHeaders, "otlp-header", "extra OTLP header as key=value; repeatable")
+	flag.StringVar(&o.otlpUser, "otlp-basic-auth-user", os.Getenv("PHP_TRACER_OTLP_BASIC_AUTH_USER"),
+		"HTTP basic auth user for the OTLP endpoint; the password is read from PHP_TRACER_OTLP_BASIC_AUTH_PASSWORD")
 
 	flag.StringVar(&o.serviceName, "service-name", envOr("OTEL_SERVICE_NAME", "php"), "service.name")
 	flag.StringVar(&o.serviceNamespace, "service-namespace", "", "service.namespace")
@@ -124,6 +130,9 @@ func parseFlags() *options {
 	flag.StringVar(&o.logLevel, "log-level", envOr("PHP_TRACER_LOG_LEVEL", "info"), "debug, info, warn or error")
 
 	flag.Parse()
+
+	// Only from the environment, so the secret does not show up in ps.
+	o.otlpPassword = os.Getenv("PHP_TRACER_OTLP_BASIC_AUTH_PASSWORD")
 
 	if len(o.binaries) == 0 {
 		o.binaries = stringList{envOr("PHP_TRACER_BINARY", "/usr/local/bin/php")}
@@ -148,6 +157,18 @@ func run() error {
 	headers, err := parseKeyValues(o.otlpHeaders)
 	if err != nil {
 		return fmt.Errorf("parse -otlp-header: %w", err)
+	}
+	if o.otlpUser != "" || o.otlpPassword != "" {
+		if headers == nil {
+			headers = map[string]string{}
+		}
+		headers["Authorization"] = "Basic " +
+			base64.StdEncoding.EncodeToString([]byte(o.otlpUser+":"+o.otlpPassword))
+	}
+	plaintext := strings.HasPrefix(o.otlpEndpoint, "http://") ||
+		(o.otlpEndpoint != "" && !strings.Contains(o.otlpEndpoint, "://") && o.otlpInsecure)
+	if len(headers) > 0 && plaintext {
+		log.Warn("sending OTLP headers without TLS; pass -otlp-insecure=false or an https:// endpoint for remote backends")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

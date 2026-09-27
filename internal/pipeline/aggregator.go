@@ -153,6 +153,8 @@ func (a *Aggregator) onFunction(ev *event.Event, now time.Time) {
 		Depth:    ev.Depth,
 		StartNS:  ev.TsStart,
 		EndNS:    ev.TsEnd,
+
+		Collapsed: ev.Collapsed(),
 	})
 	a.stats.SpansBuffered++
 	a.seen[r.Key] = now

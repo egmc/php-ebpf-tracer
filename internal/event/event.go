@@ -16,8 +16,11 @@ const (
 	TypeFunc     uint8 = 3
 )
 
-// FlagTruncated mirrors PHP_EV_F_TRUNCATED.
-const FlagTruncated uint8 = 0x01
+// Header flags, mirroring PHP_EV_F_* in bpf/php_tracer.h.
+const (
+	FlagTruncated uint8 = 0x01
+	FlagCollapsed uint8 = 0x02
+)
 
 // Record sizes, mirroring bpf/php_tracer.h. Checked against every record the
 // ring buffer hands us so a layout drift fails loudly instead of silently
@@ -96,6 +99,10 @@ func (e *Event) Key() uint64 {
 
 // Truncated reports whether the request lost frames before this event.
 func (e *Event) Truncated() bool { return e.Flags&FlagTruncated != 0 }
+
+// Collapsed reports whether this function span matched a collapse rule, i.e.
+// everything it called was suppressed in the kernel.
+func (e *Event) Collapsed() bool { return e.Flags&FlagCollapsed != 0 }
 
 // Decode parses a ring buffer record in place, overwriting every field.
 func (e *Event) Decode(raw []byte) error {

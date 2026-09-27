@@ -53,6 +53,7 @@ type options struct {
 	minDuration   time.Duration
 	minSpan       time.Duration
 	maxSpans      int
+	queueSize     int
 	maxRequestAge time.Duration
 	sweepInterval time.Duration
 	statsInterval time.Duration
@@ -106,6 +107,8 @@ func parseFlags() *options {
 	flag.DurationVar(&o.minSpan, "min-span", 0,
 		"drop function spans shorter than this before exporting, re-parenting their children")
 	flag.IntVar(&o.maxSpans, "max-spans", 5000, "maximum spans buffered per request")
+	flag.IntVar(&o.queueSize, "export-queue-size", 0,
+		"spans the OTLP exporter may hold before dropping new ones (0 = 4 x -max-spans, at least 2048)")
 	flag.DurationVar(&o.maxRequestAge, "max-request-age", time.Minute,
 		"discard buffered requests whose request__shutdown never arrived")
 	flag.DurationVar(&o.sweepInterval, "sweep-interval", 15*time.Second, "stale-state sweep interval")
@@ -133,6 +136,12 @@ func parseFlags() *options {
 
 	// Only from the environment, so the secret does not show up in ps.
 	o.otlpPassword = os.Getenv("PHP_TRACER_OTLP_BASIC_AUTH_PASSWORD")
+
+	if o.queueSize <= 0 {
+		// A request's spans are queued all at once, so leave room for a few
+		// maximal requests to be in flight while the previous batch is sent.
+		o.queueSize = max(4*o.maxSpans, 2048)
+	}
 
 	if len(o.binaries) == 0 {
 		o.binaries = stringList{envOr("PHP_TRACER_BINARY", "/usr/local/bin/php")}
@@ -183,6 +192,7 @@ func run() error {
 		ServiceNamespace:   o.serviceNamespace,
 		ServiceVersion:     o.serviceVersion,
 		ResourceAttributes: o.resourceAttrs,
+		QueueSize:          o.queueSize,
 		Clock:              clock,
 		Logger:             log,
 	})

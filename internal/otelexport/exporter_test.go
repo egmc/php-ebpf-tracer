@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/egmc/php-ebpf-tracer/internal/pipeline"
@@ -138,6 +140,81 @@ func TestExportIsolatesConsecutiveTraces(t *testing.T) {
 			t.Errorf("trace %s has %d spans, want 2", id, n)
 		}
 	}
+}
+
+// stalledExporter blocks every export until release is closed, standing in
+// for a slow or unreachable backend.
+type stalledExporter struct {
+	release chan struct{}
+
+	mu    sync.Mutex
+	names []string
+}
+
+func (s *stalledExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sp := range spans {
+		s.names = append(s.names, sp.Name())
+	}
+
+	return nil
+}
+
+func (s *stalledExporter) Shutdown(context.Context) error { return nil }
+
+// When a request has more spans than the batch processor can hold, the
+// overflow is dropped. The request span must never be part of it: without it
+// the backend shows the trace as "root span not yet received".
+func TestExportKeepsRootSpanWhenQueueOverflows(t *testing.T) {
+	ctx := context.Background()
+	sink := &stalledExporter{release: make(chan struct{})}
+
+	exp, err := newWith(ctx, Config{ServiceName: "php-test", QueueSize: 16}, sink)
+	if err != nil {
+		t.Fatalf("newWith: %v", err)
+	}
+	t.Cleanup(func() { _ = exp.Shutdown(ctx) })
+
+	const rootID = uint64(0x100)
+	req := &pipeline.Request{
+		TraceIDHi:  1,
+		TraceIDLo:  1,
+		RootSpanID: rootID,
+		StartNS:    1_000_000_000,
+		EndNS:      2_000_000_000,
+		URI:        "/big",
+		Method:     "GET",
+	}
+	for i := uint64(0); i < 5000; i++ {
+		req.Spans = append(req.Spans, pipeline.Span{
+			SpanID: 0x1000 + i, ParentID: rootID, Func: "f",
+			StartNS: 1_000_000_000 + i, EndNS: 1_000_000_001 + i,
+		})
+	}
+
+	exp.Export(req)
+	close(sink.release)
+	if err := exp.ForceFlush(ctx); err != nil {
+		t.Fatalf("ForceFlush: %v", err)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.names) > len(req.Spans) {
+		t.Fatalf("exported all %d spans; the test needs the queue to overflow", len(sink.names))
+	}
+	for _, name := range sink.names {
+		if name == "GET /big" {
+			return
+		}
+	}
+	t.Errorf("root span dropped; exported %d of %d spans", len(sink.names), len(req.Spans)+1)
 }
 
 // A URL endpoint must keep its path (Grafana Cloud serves OTLP under /otlp)

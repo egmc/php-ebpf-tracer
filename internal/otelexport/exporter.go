@@ -296,6 +296,9 @@ func spanAttributes(s *pipeline.Span) []attribute.KeyValue {
 	if s.Class != "" {
 		attrs = append(attrs, attribute.String("code.namespace", s.Class))
 	}
+	if s.Collapsed {
+		attrs = append(attrs, attribute.Bool("php.collapsed", true))
+	}
 
 	return attrs
 }

@@ -32,8 +32,16 @@ enum php_event_type {
 	PHP_EV_FUNC      = 3,
 };
 
+/* Collapse rules: a function whose class starts with one of up to
+ * MAX_COLLAPSE_RULES prefixes (or whose file starts with one of as many path
+ * prefixes) is kept as a single span while everything it calls is suppressed
+ * in the kernel. Patterns are NUL padded and always shorter than their slot,
+ * since the kernel reads at most slot-1 bytes of a name. */
+#define MAX_COLLAPSE_RULES 8
+
 /* hdr.flags */
 #define PHP_EV_F_TRUNCATED 0x01 /* frames were dropped while this request ran */
+#define PHP_EV_F_COLLAPSED 0x02 /* function span whose callees were suppressed */
 
 /* 64 bytes, 8-byte aligned. */
 struct php_ev_hdr {

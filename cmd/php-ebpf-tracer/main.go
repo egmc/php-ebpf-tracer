@@ -37,6 +37,25 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
+// defaultCollapseClasses covers class autoloading, which runs on nearly every
+// request and can emit thousands of spans before any application code runs.
+var defaultCollapseClasses = stringList{
+	`Composer\Autoload\ClassLoader`,
+	`Illuminate\Foundation\AliasLoader`,
+}
+
+// nonEmpty drops empty entries, so an explicit empty flag value clears a list.
+func nonEmpty(s stringList) stringList {
+	out := stringList{}
+	for _, v := range s {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+
+	return out
+}
+
 type options struct {
 	bpfObject string
 	binaries  stringList
@@ -49,6 +68,8 @@ type options struct {
 	traceFunctions bool
 	maxDepth       uint
 	bpfMinFunc     time.Duration
+	collapseClass  stringList
+	collapseFile   stringList
 
 	minDuration   time.Duration
 	minSpan       time.Duration
@@ -102,6 +123,12 @@ func parseFlags() *options {
 	flag.DurationVar(&o.bpfMinFunc, "bpf-min-func", 0,
 		"drop function spans shorter than this in the kernel (cheap, but children of a dropped span are re-parented onto the root)")
 
+	flag.Var(&o.collapseClass, "collapse-class",
+		"keep calls into classes starting with this prefix as one span and drop everything they call, in the kernel; "+
+			"repeatable, replaces the defaults ("+strings.Join(defaultCollapseClasses, ", ")+"); pass an empty value to disable")
+	flag.Var(&o.collapseFile, "collapse-file",
+		"like -collapse-class, matched as a prefix of the file the function is defined in, e.g. /var/www/app/vendor/; repeatable")
+
 	flag.DurationVar(&o.minDuration, "min-duration", 100*time.Millisecond,
 		"export a trace only when request__shutdown minus request__startup is at least this long (0 = export everything)")
 	flag.DurationVar(&o.minSpan, "min-span", 0,
@@ -142,6 +169,16 @@ func parseFlags() *options {
 		// maximal requests to be in flight while the previous batch is sent.
 		o.queueSize = max(4*o.maxSpans, 2048)
 	}
+
+	if o.collapseClass == nil {
+		o.collapseClass = defaultCollapseClasses
+	}
+	o.collapseClass = nonEmpty(o.collapseClass)
+	for i, c := range o.collapseClass {
+		// PHP reports class names without the leading namespace separator.
+		o.collapseClass[i] = strings.TrimPrefix(c, `\`)
+	}
+	o.collapseFile = nonEmpty(o.collapseFile)
 
 	if len(o.binaries) == 0 {
 		o.binaries = stringList{envOr("PHP_TRACER_BINARY", "/usr/local/bin/php")}
@@ -216,6 +253,8 @@ func run() error {
 		TraceFunctions:  o.traceFunctions,
 		MaxDepth:        uint32(o.maxDepth),
 		MinFuncDuration: o.bpfMinFunc,
+		CollapseClasses: o.collapseClass,
+		CollapseFiles:   o.collapseFile,
 		Logger:          log,
 	})
 	if err != nil {
@@ -240,6 +279,8 @@ func run() error {
 		"scanning", tracer.Scanning(),
 		"attached_processes", tracer.AttachedProcesses(),
 		"functions", o.traceFunctions,
+		"collapse_classes", o.collapseClass.String(),
+		"collapse_files", o.collapseFile.String(),
 		"min_duration", o.minDuration,
 		"otlp", o.otlpProtocol,
 		"endpoint", o.otlpEndpoint,

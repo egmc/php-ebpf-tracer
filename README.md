@@ -156,6 +156,7 @@ Basic 認証以外 (Bearer トークン、マルチテナントの `X-Scope-OrgI
 | `-collapse-class` | `Composer\Autoload\ClassLoader`, `Illuminate\Foundation\AliasLoader` | このクラス名で始まる呼び出しは 1 スパンだけ残し、そこから先の呼び出しをカーネル側で捨てる。複数指定可。指定すると既定値を置き換える。`-collapse-class=` で無効化 |
 | `-collapse-file` | (なし) | `-collapse-class` と同様。関数を定義したファイルのパスを前方一致で判定する (例 `/var/www/app/vendor/`)。複数指定可 |
 | `-max-spans` | `5000` | 1 リクエストあたりのスパン数上限 |
+| `-export-queue-size` | `4 × -max-spans` (最低 2048) | OTLP エクスポータが送信待ちで抱えられるスパン数。溢れた分は SDK が捨てる |
 | `-trace-functions` | `true` | `false` にすると関数プローブを張らず、リクエストスパンだけにする |
 | `-otlp-protocol` | `grpc` | `grpc` / `http` / `stdout` |
 | `-otlp-endpoint` | (空) | `host:port` か `https://host/path` 形式の URL。URL なら TLS はスキームで決まり、http ではパスがそのまま使われる。空なら `OTEL_EXPORTER_OTLP_*` 環境変数に従う |
@@ -238,6 +239,11 @@ entry 側で文字列をコピーするのは折りたたみルールを判定�
 `-min-span` でスパンを落とした場合、子スパンは親を失います。
 `pipeline.Request.finalize` が生存している最も近い祖先 (なければ root) に
 付け替えるので、木が分断されることはありません。
+
+**送信キュー** — 1 リクエスト分のスパンは OTel SDK の BatchSpanProcessor に一度に渡され、
+キューに入りきらない分は SDK が黙って捨てます。キューは `-export-queue-size` で広げてあり、
+さらに root スパンを最初に積むので、溢れても失われるのは後ろの関数スパンだけで、
+リクエストスパンは残ります。
 
 **時刻** — BPF 側は `bpf_ktime_get_ns()` (CLOCK_MONOTONIC) です。
 起動時に一度だけ CLOCK_MONOTONIC と CLOCK_REALTIME の差分を取り、その

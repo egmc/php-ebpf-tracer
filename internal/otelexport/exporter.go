@@ -59,6 +59,12 @@ type Config struct {
 	// ResourceAttributes are extra resource attributes as key=value strings.
 	ResourceAttributes []string
 
+	// QueueSize bounds the spans waiting in the batch span processor. A
+	// request's spans are all handed over at once, so it should comfortably
+	// exceed the largest request; spans that do not fit are silently dropped
+	// by the SDK. 0 keeps the SDK default (2048).
+	QueueSize int
+
 	Clock  monoclock.Clock
 	Logger *slog.Logger
 }
@@ -111,9 +117,14 @@ func newWith(ctx context.Context, cfg Config, spanExporter sdktrace.SpanExporter
 		return nil, err
 	}
 
+	var batchOpts []sdktrace.BatchSpanProcessorOption
+	if cfg.QueueSize > 0 {
+		batchOpts = append(batchOpts, sdktrace.WithMaxQueueSize(cfg.QueueSize))
+	}
+
 	gen := &idInjector{}
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(spanExporter),
+		sdktrace.WithBatcher(spanExporter, batchOpts...),
 		sdktrace.WithResource(res),
 		sdktrace.WithIDGenerator(gen),
 		// Sampling already happened in the aggregator, based on the
@@ -231,6 +242,12 @@ func (e *Exporter) Export(r *pipeline.Request) {
 		trace.WithTimestamp(e.clock.Time(r.StartNS)),
 		trace.WithAttributes(e.rootAttributes(r)...),
 	)
+	// End the root first so it is the first span queued. If the batch
+	// processor's queue overflows, the SDK drops the newest spans, and losing
+	// a few leaf calls is far better than losing the request span that every
+	// other span hangs off. The children only need rootCtx, which stays valid
+	// after End.
+	root.End(trace.WithTimestamp(e.clock.Time(r.EndNS)))
 
 	// Parents are always created before their children: finalize() ordered the
 	// slice by start time, and a callee cannot start before its caller.
@@ -254,8 +271,6 @@ func (e *Exporter) Export(r *pipeline.Request) {
 		ctxByID[s.SpanID] = childCtx
 		span.End(trace.WithTimestamp(e.clock.Time(s.EndNS)))
 	}
-
-	root.End(trace.WithTimestamp(e.clock.Time(r.EndNS)))
 
 	e.log.Debug("exported trace",
 		"trace_id", traceID.String(),

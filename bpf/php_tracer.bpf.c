@@ -41,15 +41,17 @@ const volatile __u32 max_depth       = 32; /* only emit spans shallower than thi
 const volatile __u64 min_func_ns     = 0; /* drop function spans faster than this */
 const volatile __u8  trace_functions = 1; /* 0 = request spans only */
 
-/* Collapse rules, see MAX_COLLAPSE_RULES. Only the first n_* slots are used. */
-const volatile __u32 n_collapse_classes = 0;
-const volatile char  collapse_classes[MAX_COLLAPSE_RULES][MAX_CLASS_LEN] = {};
-const volatile __u32 n_collapse_files = 0;
-const volatile char  collapse_files[MAX_COLLAPSE_RULES][MAX_FILE_LEN] = {};
+/* Include paths, see MAX_INCLUDE_PATHS. Only the first n_include_paths slots
+ * are used; 0 means every file is traced. */
+const volatile __u32 n_include_paths = 0;
+const volatile char  include_paths[MAX_INCLUDE_PATHS][MAX_FILE_LEN] = {};
 
 struct php_frame {
-	__u64 start_ns;
-	__u64 span_id; /* 0 == frame is not reported as a span */
+	__u64 start_ns; /* 0 == frame is not reported as a span */
+	/* The frame's own span when it is reported, otherwise the span of its
+	 * nearest reported ancestor (or the root), so callees always find the
+	 * right parent in frames[d-1]. */
+	__u64 span_id;
 };
 
 struct php_req_state {
@@ -60,11 +62,8 @@ struct php_req_state {
 	__u32 depth;   /* current call depth, may exceed MAX_STACK_DEPTH */
 	__u32 dropped; /* frames/records lost for this request */
 	__u32 emitted;
-	/* depth + 1 of the frame being collapsed; frames at this depth or deeper
-	 * produce no span. 0 = nothing is being collapsed. */
-	__u32 mute_depth;
 	__u8  flags;
-	__u8  pad[3];
+	__u8  pad[7];
 	struct php_frame frames[MAX_STACK_DEPTH];
 };
 
@@ -124,27 +123,21 @@ static __always_inline bool has_prefix(const char *s, const volatile char *pat,
 	return true;
 }
 
-/* Reports whether the function being entered matches a collapse rule. */
-static __always_inline bool collapse_match(long classname, long file)
+/* Reports whether a function defined in file should produce a span. */
+static __always_inline bool path_included(long file)
 {
-	char cls[MAX_CLASS_LEN];
 	char path[MAX_FILE_LEN];
 
-	if (n_collapse_classes && classname &&
-	    bpf_probe_read_user_str(cls, sizeof(cls),
-				    (const void *)(unsigned long)classname) > 1) {
-		for (__u32 r = 0; r < MAX_COLLAPSE_RULES && r < n_collapse_classes; r++)
-			if (has_prefix(cls, collapse_classes[r], MAX_CLASS_LEN))
-				return true;
-	}
-
-	if (n_collapse_files && file &&
+	if (!n_include_paths)
+		return true;
+	if (!file ||
 	    bpf_probe_read_user_str(path, sizeof(path),
-				    (const void *)(unsigned long)file) > 1) {
-		for (__u32 r = 0; r < MAX_COLLAPSE_RULES && r < n_collapse_files; r++)
-			if (has_prefix(path, collapse_files[r], MAX_FILE_LEN))
-				return true;
-	}
+				    (const void *)(unsigned long)file) <= 1)
+		return false;
+
+	for (__u32 r = 0; r < MAX_INCLUDE_PATHS && r < n_include_paths; r++)
+		if (has_prefix(path, include_paths[r], MAX_FILE_LEN))
+			return true;
 
 	return false;
 }
@@ -186,7 +179,6 @@ int BPF_USDT(usdt_request_startup, long file, long uri, long method)
 	st->depth = 0;
 	st->dropped = 0;
 	st->emitted = 0;
-	st->mute_depth = 0;
 	st->flags = 0;
 
 	if (bpf_map_update_elem(&requests, &id, st, BPF_ANY))
@@ -257,7 +249,6 @@ int BPF_USDT(usdt_function_entry, long func_name, long req_file, long lineno,
 	__u64 id = bpf_get_current_pid_tgid();
 	struct php_req_state *st;
 	struct php_frame *f;
-	bool muted;
 	__u32 d;
 
 	if (!trace_functions)
@@ -269,31 +260,30 @@ int BPF_USDT(usdt_function_entry, long func_name, long req_file, long lineno,
 
 	d = st->depth;
 	st->depth = d + 1;
-	muted = st->mute_depth && d >= st->mute_depth;
 
 	if (d >= MAX_STACK_DEPTH) {
 		/* Too deep to track; the matching return decrements depth back
-		 * into range so the shadow stack stays aligned. Frames inside a
-		 * collapsed call were never going to be reported, so they do
-		 * not count as lost. */
-		if (!muted) {
-			st->dropped++;
-			st->flags |= PHP_EV_F_TRUNCATED;
-		}
+		 * into range so the shadow stack stays aligned. */
+		st->dropped++;
+		st->flags |= PHP_EV_F_TRUNCATED;
 		return 0;
 	}
 
 	f = &st->frames[FRAME_IDX(d)];
-	if (muted || d >= max_depth) {
-		f->span_id = 0;
+	f->start_ns = 0;
+	if (d >= max_depth)
+		return 0;
+
+	if (!path_included(req_file)) {
+		/* Not reported: callees attach to the nearest reported ancestor. */
+		f->span_id = st->root_span_id;
+		if (d > 0)
+			f->span_id = st->frames[FRAME_IDX(d - 1)].span_id;
 		return 0;
 	}
 
 	f->span_id = rand_u64();
-	if (collapse_match(classname, req_file))
-		st->mute_depth = d + 1;
-
-	/* Taken last so the rule matching above is not billed to the span. */
+	/* Taken last so the path matching above is not billed to the span. */
 	f->start_ns = bpf_ktime_get_ns();
 
 	return 0;
@@ -309,7 +299,6 @@ int BPF_USDT(usdt_function_return, long func_name, long req_file, long lineno,
 	struct php_func_event *e;
 	struct php_frame *f;
 	__u64 parent;
-	bool collapsed;
 	__u32 d;
 
 	if (!trace_functions)
@@ -325,16 +314,12 @@ int BPF_USDT(usdt_function_return, long func_name, long req_file, long lineno,
 	d--;
 	st->depth = d;
 
-	collapsed = st->mute_depth == d + 1;
-	if (collapsed)
-		st->mute_depth = 0;
-
 	if (d >= MAX_STACK_DEPTH)
 		return 0; /* frame was never recorded */
 
 	f = &st->frames[FRAME_IDX(d)];
-	if (!f->span_id)
-		return 0; /* deeper than max_depth */
+	if (!f->start_ns)
+		return 0; /* deeper than max_depth or outside the include paths */
 
 	if (min_func_ns && now - f->start_ns < min_func_ns) {
 		/* Cheap volume control. Any children already emitted lose
@@ -354,8 +339,6 @@ int BPF_USDT(usdt_function_return, long func_name, long req_file, long lineno,
 	}
 
 	fill_hdr(&e->hdr, PHP_EV_FUNC, id, st);
-	if (collapsed)
-		e->hdr.flags |= PHP_EV_F_COLLAPSED;
 	e->hdr.ts_start = f->start_ns;
 	e->hdr.ts_end = now;
 	e->hdr.span_id = f->span_id;

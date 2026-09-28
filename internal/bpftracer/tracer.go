@@ -26,12 +26,11 @@ const (
 	probeFunctionReturn  = "function__return"
 )
 
-// Collapse rule limits, mirroring MAX_COLLAPSE_RULES, MAX_CLASS_LEN and
-// MAX_FILE_LEN in bpf/php_tracer.h.
+// Include path limits, mirroring MAX_INCLUDE_PATHS and MAX_FILE_LEN in
+// bpf/php_tracer.h.
 const (
-	MaxCollapseRules = 8
-	maxClassLen      = 64
-	maxFileLen       = 128
+	MaxIncludePaths = 8
+	maxFileLen      = 128
 )
 
 // AttachAllPIDs attaches to every process mapping the target binary, present
@@ -77,13 +76,11 @@ type Config struct {
 	// re-parented onto the request root; prefer the userspace filter unless
 	// the event rate is a problem.
 	MinFuncDuration time.Duration
-	// CollapseClasses and CollapseFiles are prefixes matched against the
-	// class name and the defining file of every function entered. A matching
-	// call is kept as a single span and everything it calls is suppressed in
-	// the kernel, which keeps high-volume plumbing such as class autoloading
-	// out of the ring buffer entirely. At most MaxCollapseRules of each.
-	CollapseClasses []string
-	CollapseFiles   []string
+	// IncludePaths are prefixes matched in the kernel against the file each
+	// function is defined in. When set, only matching functions produce a
+	// span; the callees of a skipped function are attached to its nearest
+	// reported ancestor. Empty traces every file. At most MaxIncludePaths.
+	IncludePaths []string
 
 	// ProcRoot is the procfs mount used for process discovery.
 	ProcRoot string
@@ -134,10 +131,7 @@ type Tracer struct {
 func New(cfg Config) (*Tracer, error) {
 	cfg.setDefaults()
 
-	if err := validateCollapse("class", cfg.CollapseClasses, maxClassLen); err != nil {
-		return nil, err
-	}
-	if err := validateCollapse("file", cfg.CollapseFiles, maxFileLen); err != nil {
+	if err := validateIncludePaths(cfg.IncludePaths); err != nil {
 		return nil, err
 	}
 
@@ -216,10 +210,8 @@ func (t *Tracer) initGlobals() error {
 		{"max_depth", t.cfg.MaxDepth},
 		{"min_func_ns", uint64(t.cfg.MinFuncDuration.Nanoseconds())},
 		{"trace_functions", traceFunctions},
-		{"n_collapse_classes", uint32(len(t.cfg.CollapseClasses))},
-		{"collapse_classes", collapseSlots(t.cfg.CollapseClasses, maxClassLen)},
-		{"n_collapse_files", uint32(len(t.cfg.CollapseFiles))},
-		{"collapse_files", collapseSlots(t.cfg.CollapseFiles, maxFileLen)},
+		{"n_include_paths", uint32(len(t.cfg.IncludePaths))},
+		{"include_paths", includeSlots(t.cfg.IncludePaths)},
 	}
 	for _, g := range globals {
 		if err := t.module.InitGlobalVariable(g.name, g.value); err != nil {
@@ -230,31 +222,32 @@ func (t *Tracer) initGlobals() error {
 	return nil
 }
 
-// validateCollapse rejects rules the BPF side cannot honour. The kernel reads
-// at most size-1 bytes of a name, so a longer prefix could never match.
-func validateCollapse(kind string, rules []string, size int) error {
-	if len(rules) > MaxCollapseRules {
-		return fmt.Errorf("bpftracer: at most %d collapse %s rules are supported, got %d",
-			MaxCollapseRules, kind, len(rules))
+// validateIncludePaths rejects paths the BPF side cannot honour. The kernel
+// reads at most maxFileLen-1 bytes of a path, so a longer prefix could never
+// match.
+func validateIncludePaths(paths []string) error {
+	if len(paths) > MaxIncludePaths {
+		return fmt.Errorf("bpftracer: at most %d include paths are supported, got %d",
+			MaxIncludePaths, len(paths))
 	}
-	for _, r := range rules {
-		if r == "" {
-			return fmt.Errorf("bpftracer: empty collapse %s rule", kind)
+	for _, p := range paths {
+		if p == "" {
+			return errors.New("bpftracer: empty include path")
 		}
-		if len(r) >= size {
-			return fmt.Errorf("bpftracer: collapse %s rule %q is longer than %d bytes", kind, r, size-1)
+		if len(p) >= maxFileLen {
+			return fmt.Errorf("bpftracer: include path %q is longer than %d bytes", p, maxFileLen-1)
 		}
 	}
 
 	return nil
 }
 
-// collapseSlots lays rules out as the NUL padded char[MaxCollapseRules][size]
-// array the BPF program expects.
-func collapseSlots(rules []string, size int) []byte {
-	slots := make([]byte, MaxCollapseRules*size)
-	for i, r := range rules {
-		copy(slots[i*size:], r)
+// includeSlots lays paths out as the NUL padded
+// char[MaxIncludePaths][maxFileLen] array the BPF program expects.
+func includeSlots(paths []string) []byte {
+	slots := make([]byte, MaxIncludePaths*maxFileLen)
+	for i, p := range paths {
+		copy(slots[i*maxFileLen:], p)
 	}
 
 	return slots

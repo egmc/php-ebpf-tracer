@@ -153,8 +153,7 @@ Basic 認証以外 (Bearer トークン、マルチテナントの `X-Scope-OrgI
 | `-min-span` | `0` | これより短い関数スパンを送信前に捨てる (子は生存する祖先に付け替え) |
 | `-max-depth` | `32` | この深さより深い呼び出しはスパンにしない |
 | `-bpf-min-func` | `0` | カーネル側で短い関数スパンを捨てる。安価だが子スパンが root 直下に付け替わる |
-| `-collapse-class` | `Composer\Autoload\ClassLoader`, `Illuminate\Foundation\AliasLoader` | このクラス名で始まる呼び出しは 1 スパンだけ残し、そこから先の呼び出しをカーネル側で捨てる。複数指定可。指定すると既定値を置き換える。`-collapse-class=` で無効化 |
-| `-collapse-file` | (なし) | `-collapse-class` と同様。関数を定義したファイルのパスを前方一致で判定する (例 `/var/www/app/vendor/`)。複数指定可 |
+| `-include-path` | (なし = 全ファイル) | このディレクトリ以下のファイルで定義された関数だけをスパンにする。カーネル側で前方一致判定。複数指定可 (最大 8 件) |
 | `-max-spans` | `5000` | 1 リクエストあたりのスパン数上限 |
 | `-export-queue-size` | `4 × -max-spans` (最低 2048) | OTLP エクスポータが送信待ちで抱えられるスパン数。溢れた分は SDK が捨てる |
 | `-trace-functions` | `true` | `false` にすると関数プローブを張らず、リクエストスパンだけにする |
@@ -166,35 +165,29 @@ Basic 認証以外 (Bearer トークン、マルチテナントの `X-Scope-OrgI
 | `-service-name` | `php` | `service.name` |
 | `-max-request-age` | `1m` | `request__shutdown` が来ないリクエストのバッファを捨てるまでの時間 |
 
-## 呼び出しの折りたたみ (オートロードなど)
+## 対象ファイルの絞り込み
 
-Composer のオートロードのように、毎リクエスト大量に走るのに中身を見たいわけではない
-呼び出しは、`-collapse-class` / `-collapse-file` で折りたためます。
-
-- 一致した呼び出し自体は 1 スパンとして残り、所要時間は見えます。そのスパンには
-  `php.collapsed=true` が付き、子スパンはありません。
-- そこから先の呼び出しは、**カーネル内で**スパンを作らずに捨てます。ring buffer にも
-  Go 側のバッファにも載らないので、`-max-spans` の上限や OTLP の送信量も圧迫しません。
-- 子孫をまるごと捨てるので、`-min-span` / `-bpf-min-func` と違って root 直下に
-  付け替わるスパンは出ません。
-
-既定では Composer のオートローダと Laravel の `AliasLoader` を折りたたみます。
-クラス名は PHP が報告するとおり先頭の `\` なしで、前方一致で判定します。
-ルールはクラス・ファイルそれぞれ 8 件まで、長さはクラス 63 バイト・ファイル 127 バイトまでです。
+`-include-path` を指定すると、そのディレクトリ以下のファイルで定義された関数だけが
+スパンになります。vendor 配下のフレームワークやライブラリを除いて、アプリのコードだけを
+見たい場合に使います。
 
 ```sh
-# 既定値に加えて .env の読み込み処理も折りたたむ
 php-ebpf-tracer \
-  -collapse-class 'Composer\Autoload\ClassLoader' \
-  -collapse-class 'Illuminate\Foundation\AliasLoader' \
-  -collapse-class 'Illuminate\Foundation\Bootstrap\LoadEnvironmentVariables'
+  -include-path /var/www/app/app \
+  -include-path /var/www/app/routes
 ```
 
-`-collapse-file` に vendor ディレクトリを指定すると、アプリから vendor への最初の呼び出しだけが
-残ります。ただし Laravel などのフレームワーク本体も vendor 配下にあるため、
-`Illuminate\Foundation\Http\Kernel::handle` の時点で折りたたまれて、コントローラ以下が
-すべて消えます。フレームワーク経由でアプリのコードが呼ばれる構成では、vendor 丸ごとではなく
-クラス単位で指定してください。
+- 判定は関数を定義したファイルのパスに対する前方一致で、**カーネル内で**行います。
+  対象外の関数は ring buffer にも Go 側のバッファにも載りません。
+- 末尾に `/` がなければ補います。`/var/www/app` が `/var/www/app2/` に一致することは
+  ありません。
+- 対象外の関数から呼ばれた関数は、スパンになっている最も近い祖先 (なければ root) の
+  子になります。フレームワーク経由で呼ばれるコントローラも root 直下などに正しくぶら下がります。
+- `-max-depth` と `php.call.depth` は、対象外の関数も含めた実際の呼び出しの深さで数えます。
+- 対象外の関数でも USDT プローブ自体は発火するので、プローブのオーバーヘッドは変わりません。
+  減るのは ring buffer に書くレコードと、Go 側の処理量です。
+- パスは最大 8 件、長さは 127 バイトまでです。カーネルはパスを 127 バイトまでしか
+  読まないため、それより深いパスは判定できません。
 
 ## 送信判定 (テールサンプリング) の仕組み
 
@@ -232,8 +225,10 @@ PHP を non-PIE でビルドしてください。
 **シャドウスタック** — `function__entry` は `frames[depth]` に開始時刻と span id を
 積むだけ、`function__return` がそれを取り出して 1 レコードを ring buffer に書きます。
 関数名・クラス名・行番号は return 側のプローブ引数からそのまま読めるので、
-entry 側で文字列をコピーするのは折りたたみルールを判定するときだけです。
-ルールが空ならベリファイアがその判定コードごと取り除きます。
+entry 側で文字列をコピーするのは `-include-path` を判定するときだけです。
+指定がなければベリファイアがその判定コードごと取り除きます。
+対象外のフレームには祖先の span id を引き継がせておくので、子のスパンは
+`frames[depth-1]` を見るだけで正しい親を得られます。
 
 **壊れた木の修復** — `zend_bailout` (fatal error / `exit()`) で巻き戻された場合や
 `-min-span` でスパンを落とした場合、子スパンは親を失います。

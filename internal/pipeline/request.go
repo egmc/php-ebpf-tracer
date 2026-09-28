@@ -15,9 +15,6 @@ type Span struct {
 	Depth    uint32
 	StartNS  uint64
 	EndNS    uint64
-	// Collapsed is set when the calls made by this function were suppressed
-	// by a collapse rule, so its duration has no child spans to explain it.
-	Collapsed bool
 }
 
 // Name renders the span name, "Class::method" for methods and the bare

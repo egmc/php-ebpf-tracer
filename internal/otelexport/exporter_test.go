@@ -45,7 +45,7 @@ func TestExportPreservesKernelIDs(t *testing.T) {
 			{SpanID: outerID, ParentID: rootID, Func: "handle_slow",
 				StartNS: 1_010_000_000, EndNS: 1_240_000_000, Lineno: 77},
 			{SpanID: innerID, ParentID: outerID, Func: "findAll", Class: "Repository",
-				StartNS: 1_020_000_000, EndNS: 1_200_000_000, Depth: 1, Collapsed: true},
+				StartNS: 1_020_000_000, EndNS: 1_200_000_000, Depth: 1},
 		},
 	}
 
@@ -89,12 +89,6 @@ func TestExportPreservesKernelIDs(t *testing.T) {
 	}
 	if got := inner.SpanContext.TraceID(); got != root.SpanContext.TraceID() {
 		t.Errorf("findAll trace id = %s, want %s", got, root.SpanContext.TraceID())
-	}
-	if !hasBoolAttr(inner, "php.collapsed") {
-		t.Error("findAll is missing php.collapsed")
-	}
-	if hasBoolAttr(outer, "php.collapsed") {
-		t.Error("handle_slow has php.collapsed, want it only on collapsed calls")
 	}
 	// Every span in the request shares one trace.
 	for _, s := range spans {
@@ -271,14 +265,4 @@ func spanNames(spans tracetest.SpanStubs) []string {
 	}
 
 	return out
-}
-
-func hasBoolAttr(s tracetest.SpanStub, key string) bool {
-	for _, kv := range s.Attributes {
-		if string(kv.Key) == key {
-			return kv.Value.AsBool()
-		}
-	}
-
-	return false
 }

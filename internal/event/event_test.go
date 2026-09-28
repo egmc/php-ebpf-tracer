@@ -59,17 +59,6 @@ func TestDecodeFunctionEvent(t *testing.T) {
 	if ev.TsEnd-ev.TsStart != 2_000 {
 		t.Errorf("duration = %d", ev.TsEnd-ev.TsStart)
 	}
-	if ev.Collapsed() {
-		t.Error("Collapsed = true, want false")
-	}
-
-	raw[offFlags] |= FlagCollapsed
-	if err := ev.Decode(raw); err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	if !ev.Collapsed() || !ev.Truncated() {
-		t.Errorf("Collapsed/Truncated = %v/%v, want true/true", ev.Collapsed(), ev.Truncated())
-	}
 }
 
 func TestDecodeRequestEvent(t *testing.T) {

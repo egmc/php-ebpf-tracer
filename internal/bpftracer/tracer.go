@@ -26,9 +26,12 @@ const (
 	probeFunctionReturn  = "function__return"
 )
 
-// Include path limits, mirroring MAX_INCLUDE_PATHS and MAX_FILE_LEN in
+// Limits mirroring MAX_STACK_DEPTH, MAX_INCLUDE_PATHS and MAX_FILE_LEN in
 // bpf/php_tracer.h.
 const (
+	// MaxStackDepth is the deepest call the kernel tracks; a MaxDepth
+	// beyond it has no further effect.
+	MaxStackDepth   = 128
 	MaxIncludePaths = 8
 	maxFileLen      = 128
 )

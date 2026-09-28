@@ -123,6 +123,24 @@ static __always_inline bool has_prefix(const char *s, const volatile char *pat,
 	return true;
 }
 
+/* Reports whether func is "main", the name PHP gives to the top-level code of
+ * a script. Besides the entry script, which the request span already covers,
+ * that is every include/require, which in practice is mostly class files
+ * pulled in by the autoloader. */
+static __always_inline bool is_main(long func)
+{
+	/* One byte longer than "main" + NUL, so a longer name that the read
+	 * truncates to "main" does not also return 5. */
+	char name[6];
+
+	if (!func ||
+	    bpf_probe_read_user_str(name, sizeof(name),
+				    (const void *)(unsigned long)func) != 5)
+		return false;
+
+	return name[0] == 'm' && name[1] == 'a' && name[2] == 'i' && name[3] == 'n';
+}
+
 /* Reports whether a function defined in file should produce a span. */
 static __always_inline bool path_included(long file)
 {
@@ -274,7 +292,8 @@ int BPF_USDT(usdt_function_entry, long func_name, long req_file, long lineno,
 	if (d >= max_depth)
 		return 0;
 
-	if (!path_included(req_file)) {
+	/* is_main first: it reads 6 bytes, path_included up to 128. */
+	if (is_main(func_name) || !path_included(req_file)) {
 		/* Not reported: callees attach to the nearest reported ancestor. */
 		f->span_id = st->root_span_id;
 		if (d > 0)
@@ -283,7 +302,7 @@ int BPF_USDT(usdt_function_entry, long func_name, long req_file, long lineno,
 	}
 
 	f->span_id = rand_u64();
-	/* Taken last so the path matching above is not billed to the span. */
+	/* Taken last so the matching above is not billed to the span. */
 	f->start_ns = bpf_ktime_get_ns();
 
 	return 0;
@@ -319,7 +338,7 @@ int BPF_USDT(usdt_function_return, long func_name, long req_file, long lineno,
 
 	f = &st->frames[FRAME_IDX(d)];
 	if (!f->start_ns)
-		return 0; /* deeper than max_depth or outside the include paths */
+		return 0; /* deeper than max_depth, main or outside the include paths */
 
 	if (min_func_ns && now - f->start_ns < min_func_ns) {
 		/* Cheap volume control. Any children already emitted lose

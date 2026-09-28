@@ -117,7 +117,8 @@ func parseFlags() *options {
 	flag.BoolVar(&o.traceFunctions, "trace-functions", true,
 		"attach function__entry/function__return; disable for request-level spans only")
 	flag.UintVar(&o.maxDepth, "max-depth", 32,
-		"deepest PHP call depth that still produces a span")
+		fmt.Sprintf("deepest PHP call depth that still produces a span, counting calls outside -include-path too "+
+			"(default %d when -include-path is set)", bpftracer.MaxStackDepth))
 	flag.DurationVar(&o.bpfMinFunc, "bpf-min-func", 0,
 		"drop function spans shorter than this in the kernel (cheap, but children of a dropped span are re-parented onto the root)")
 
@@ -167,12 +168,31 @@ func parseFlags() *options {
 	}
 
 	o.includePaths = dirPrefixes(o.includePaths)
+	if len(o.includePaths) > 0 && !flagSet("max-depth") {
+		// Frameworks call into the application from deep inside their own
+		// code, so the default of 32 cuts off the very calls asked for.
+		// Skipped frames produce no spans, so tracking up to the limit of
+		// the kernel's shadow stack costs little.
+		o.maxDepth = bpftracer.MaxStackDepth
+	}
 
 	if len(o.binaries) == 0 {
 		o.binaries = stringList{envOr("PHP_TRACER_BINARY", "/usr/local/bin/php")}
 	}
 
 	return o
+}
+
+// flagSet reports whether the named flag was given on the command line.
+func flagSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+
+	return set
 }
 
 func run() error {
@@ -267,6 +287,7 @@ func run() error {
 		"attached_processes", tracer.AttachedProcesses(),
 		"functions", o.traceFunctions,
 		"include_paths", o.includePaths.String(),
+		"max_depth", o.maxDepth,
 		"min_duration", o.minDuration,
 		"otlp", o.otlpProtocol,
 		"endpoint", o.otlpEndpoint,

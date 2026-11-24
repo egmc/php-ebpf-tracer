@@ -1,5 +1,5 @@
-github.com/aquasecurity/libbpfgo v0.10.0-libbpf-1.5.1 h1:i/6EeKnBR3XVeLmOyMbM0Oq+kIC08n613zwkD8lix8w=
-github.com/aquasecurity/libbpfgo v0.10.0-libbpf-1.5.1/go.mod h1:veHe4u3xEpl0TBV+wX0AFJWOsnteNPOhNklRbYf3d+k=
+github.com/aquasecurity/libbpfgo v0.11.0-libbpf-1.8-dev-2bbc483 h1:cIVgy3qUrc/zIJQijxC+VXou00JBtegmRghdMuCrQKc=
+github.com/aquasecurity/libbpfgo v0.11.0-libbpf-1.8-dev-2bbc483/go.mod h1:bRzdRnYH24hENJCufBHJvSbtFIhtWSAGg4OSWhvyLso=
 github.com/cenkalti/backoff/v5 v5.0.2 h1:rIfFVxEf1QsI7E1ZHfp/B4DF/6QBAUhmgkxc0H7Zss8=
 github.com/cenkalti/backoff/v5 v5.0.2/go.mod h1:rkhZdG3JZukswDf7f0cwqPNk4K0sa+F97BxZthm/crw=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=

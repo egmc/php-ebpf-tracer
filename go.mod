@@ -3,7 +3,7 @@ module github.com/egmc/php-ebpf-tracer
 go 1.24
 
 require (
-	github.com/aquasecurity/libbpfgo v0.10.0-libbpf-1.5.1
+	github.com/aquasecurity/libbpfgo v0.11.0-libbpf-1.8-dev-2bbc483
 	go.opentelemetry.io/otel v1.37.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.37.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.37.0

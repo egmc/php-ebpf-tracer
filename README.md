@@ -98,7 +98,7 @@ sudo ./build/php-ebpf-tracer \
     -otlp-endpoint localhost:4317
 ```
 
-システムに libbpf を入れずにビルドする場合は、git submodule の libbpf (v1.5.1)
+システムに libbpf を入れずにビルドする場合は、git submodule の libbpf (v1.8-dev, 2bbc483)
 をビルドして静的リンクする `LIBBPF_BUNDLED=1` を指定します。
 
 ```sh

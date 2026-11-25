@@ -60,6 +60,24 @@ type Request struct {
 	DroppedFrames uint32
 
 	Spans []Span
+
+	// dropped maps the id of each span discarded by the duration filter to
+	// its parent id, so that finalize can walk past it. Spans return before
+	// their callers, so when a child arrives it is not yet known whether
+	// its parent will survive.
+	dropped map[uint64]uint64
+}
+
+// rememberDropped records a span dropped by the duration filter. Once limit
+// ids are held, further ids are forgotten.
+func (r *Request) rememberDropped(id, parent uint64, limit int) {
+	if r.dropped == nil {
+		r.dropped = make(map[uint64]uint64)
+	}
+	if len(r.dropped) >= limit {
+		return
+	}
+	r.dropped[id] = parent
 }
 
 // DurationNS is the request__startup to request__shutdown delta. This is the
@@ -110,7 +128,9 @@ func putUint64BE(b []byte, v uint64) {
 //
 //  1. spans shorter than minSpanNS are dropped and their children are
 //     re-attached to the nearest surviving ancestor, so the tree stays
-//     connected instead of collapsing onto the root;
+//     connected instead of collapsing onto the root. The Aggregator already
+//     drops short spans on arrival and records them in r.dropped, which
+//     this walk follows; the filter here only catches what is left;
 //  2. spans whose parent never arrived (kernel-side drop, or a bailout that
 //     unwound without firing function__return) are re-parented onto the root;
 //  3. the result is ordered so that a parent always precedes its children,
@@ -139,19 +159,24 @@ func (r *Request) finalize(minSpanNS uint64) int {
 		if v, ok := resolved[id]; ok {
 			return v
 		}
-		s, ok := byID[id]
-		if !ok {
+		var parent uint64
+		if s, ok := byID[id]; ok {
+			if kept[id] {
+				resolved[id] = id
+				return id
+			}
+			parent = s.ParentID
+		} else if p, ok := r.dropped[id]; ok {
+			// Dropped on arrival by the duration filter.
+			parent = p
+		} else {
 			// Parent was never reported: attach to the root.
 			resolved[id] = r.RootSpanID
 			return r.RootSpanID
 		}
 		// Guard against a cycle from a recycled span id.
 		resolved[id] = r.RootSpanID
-		if kept[id] {
-			resolved[id] = id
-			return id
-		}
-		p := effectiveParent(s.ParentID)
+		p := effectiveParent(parent)
 		resolved[id] = p
 
 		return p
@@ -169,6 +194,7 @@ func (r *Request) finalize(minSpanNS uint64) int {
 		out = append(out, s)
 	}
 	r.Spans = out
+	r.dropped = nil
 
 	// A callee always starts at or after its caller, so ordering by start time
 	// (depth breaking ties for zero-cost frames) yields a valid topological

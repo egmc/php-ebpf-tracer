@@ -15,7 +15,9 @@ type Config struct {
 	MinDuration time.Duration
 
 	// MinSpanDuration drops individual function spans shorter than this,
-	// re-parenting their children. Zero keeps every span.
+	// re-parenting their children. The filter runs as each span arrives,
+	// before MaxSpansPerRequest is checked, so dropped spans do not count
+	// towards the cap. Zero keeps every span.
 	MinSpanDuration time.Duration
 
 	// MaxSpansPerRequest bounds the memory a single pathological request can
@@ -137,6 +139,19 @@ func (a *Aggregator) onFunction(ev *event.Event, now time.Time) {
 		a.stats.SpansOrphaned++
 		return
 	}
+	a.seen[r.Key] = now
+
+	// Apply the duration filter before the span cap, so that a flood of
+	// short calls cannot use up the budget and push the slow calls that
+	// come later in the request out of the trace. Only the span's parent
+	// is kept, so finalize can still re-attach any surviving children.
+	if minNS := uint64(a.cfg.MinSpanDuration.Nanoseconds()); minNS > 0 &&
+		(ev.TsEnd < ev.TsStart || ev.TsEnd-ev.TsStart < minNS) {
+		a.stats.SpansDroppedShort++
+		r.rememberDropped(ev.SpanID, ev.ParentSpanID, a.maxDropped())
+		return
+	}
+
 	if len(r.Spans) >= a.cfg.MaxSpansPerRequest {
 		a.stats.SpansDroppedCap++
 		r.Truncated = true
@@ -155,8 +170,16 @@ func (a *Aggregator) onFunction(ev *event.Event, now time.Time) {
 		EndNS:    ev.TsEnd,
 	})
 	a.stats.SpansBuffered++
-	a.seen[r.Key] = now
 }
+
+// maxDropped bounds how many dropped span ids one request remembers for
+// re-parenting. Past the limit, short spans are still dropped, and a child
+// whose parent was forgotten attaches to the root instead.
+func (a *Aggregator) maxDropped() int {
+	return droppedPerSpan * a.cfg.MaxSpansPerRequest
+}
+
+const droppedPerSpan = 16
 
 func (a *Aggregator) onRequestEnd(ev *event.Event) {
 	key := ev.Key()

@@ -204,3 +204,77 @@ func TestSpansFromOtherTraceAreRejected(t *testing.T) {
 		t.Fatalf("SpansOrphaned = %d, want 1", s.SpansOrphaned)
 	}
 }
+
+func TestShortSpansDoNotUseUpCap(t *testing.T) {
+	sink := &capture{}
+	agg := New(Config{MinSpanDuration: 50 * time.Nanosecond, MaxSpansPerRequest: 3}, sink)
+
+	const key = uint64(15)<<32 | 15
+	now := time.Now()
+	agg.Handle(startEvent(key, 0), now)
+	// Far more short calls than the cap allows, then the slow call that
+	// returns last, as a template render at the end of a request would.
+	for i := uint64(0); i < 100; i++ {
+		agg.Handle(funcEvent(key, 0x100+i, 0xa, 10+i, 11+i, "tiny", 1), now)
+	}
+	agg.Handle(funcEvent(key, 0xa, rootID, 5, 500, "slow", 0), now)
+	agg.Handle(endEvent(key, 0, 1000), now)
+
+	r := sink.got[0]
+	if len(r.Spans) != 1 || r.Spans[0].Func != "slow" {
+		t.Fatalf("spans = %+v, want only slow", r.Spans)
+	}
+	if r.Truncated {
+		t.Error("trace marked truncated although no kept span hit the cap")
+	}
+	s := agg.Stats()
+	if s.SpansDroppedShort != 100 || s.SpansDroppedCap != 0 || s.SpansBuffered != 1 {
+		t.Errorf("stats = %+v, want 100 short, 0 cap, 1 buffered", s)
+	}
+}
+
+func TestCapStillAppliesToKeptSpans(t *testing.T) {
+	sink := &capture{}
+	agg := New(Config{MinSpanDuration: 50 * time.Nanosecond, MaxSpansPerRequest: 2}, sink)
+
+	const key = uint64(17)<<32 | 17
+	now := time.Now()
+	agg.Handle(startEvent(key, 0), now)
+	for i := uint64(0); i < 5; i++ {
+		agg.Handle(funcEvent(key, 0x10+i, rootID, i*100, i*100+90, "long", 0), now)
+	}
+	agg.Handle(endEvent(key, 0, 1000), now)
+
+	r := sink.got[0]
+	if len(r.Spans) != 2 || !r.Truncated {
+		t.Fatalf("got %d spans truncated=%v, want 2 and truncated", len(r.Spans), r.Truncated)
+	}
+	if s := agg.Stats(); s.SpansDroppedCap != 3 {
+		t.Errorf("SpansDroppedCap = %d, want 3", s.SpansDroppedCap)
+	}
+}
+
+func TestForgottenDroppedParentFallsBackToRoot(t *testing.T) {
+	sink := &capture{}
+	// MaxSpansPerRequest 1 lets the request remember droppedPerSpan ids.
+	agg := New(Config{MinSpanDuration: 50 * time.Nanosecond, MaxSpansPerRequest: 1}, sink)
+
+	const key = uint64(19)<<32 | 19
+	now := time.Now()
+	agg.Handle(startEvent(key, 0), now)
+	for i := uint64(0); i < droppedPerSpan; i++ {
+		agg.Handle(funcEvent(key, 0x100+i, 0xa, 1, 2, "filler", 2), now)
+	}
+	// Kept child of a short span that no longer fits in the dropped map.
+	agg.Handle(funcEvent(key, 0xc, 0xb, 30, 130, "child", 2), now)
+	agg.Handle(funcEvent(key, 0xb, 0xa, 20, 30, "forgotten", 1), now)
+	agg.Handle(endEvent(key, 0, 300), now)
+
+	r := sink.got[0]
+	if len(r.Spans) != 1 || r.Spans[0].Func != "child" {
+		t.Fatalf("spans = %+v, want only child", r.Spans)
+	}
+	if got := r.Spans[0].ParentID; got != rootID {
+		t.Errorf("child parent = %#x, want root %#x", got, uint64(rootID))
+	}
+}

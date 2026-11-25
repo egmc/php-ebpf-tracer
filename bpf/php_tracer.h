@@ -19,10 +19,9 @@
 
 /* Maximum PHP userland call depth we keep per-request state for. Deeper
  * frames are counted but produce no span. Must stay a power of two: the BPF
- * program masks indices with FRAME_IDX so the verifier can prove they are in
- * range without relying on how clang orders the bounds check. */
+ * program masks indices with frame_idx() so the verifier can prove they are
+ * in range without relying on how clang orders the bounds check. */
 #define MAX_STACK_DEPTH 128
-#define FRAME_IDX(d)    ((d) & (MAX_STACK_DEPTH - 1))
 _Static_assert((MAX_STACK_DEPTH & (MAX_STACK_DEPTH - 1)) == 0,
 	       "MAX_STACK_DEPTH must be a power of two");
 

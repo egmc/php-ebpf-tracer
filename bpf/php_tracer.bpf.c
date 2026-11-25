@@ -32,6 +32,16 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
+/* Index into php_req_state.frames. The barrier keeps clang from dropping the
+ * mask: after a `d >= MAX_STACK_DEPTH` check it knows the mask is a no-op and
+ * clang 21 then derives d - 1 from a register whose bounds the verifier has
+ * lost, which the verifier rejects as an unbounded map access. */
+static __always_inline __u32 frame_idx(__u32 d)
+{
+	barrier_var(d);
+	return d & (MAX_STACK_DEPTH - 1);
+}
+
 /*
  * Configuration, populated from Go via Module.InitGlobalVariable() before the
  * object is loaded.
@@ -287,7 +297,7 @@ int BPF_USDT(usdt_function_entry, long func_name, long req_file, long lineno,
 		return 0;
 	}
 
-	f = &st->frames[FRAME_IDX(d)];
+	f = &st->frames[frame_idx(d)];
 	f->start_ns = 0;
 	if (d >= max_depth)
 		return 0;
@@ -297,7 +307,7 @@ int BPF_USDT(usdt_function_entry, long func_name, long req_file, long lineno,
 		/* Not reported: callees attach to the nearest reported ancestor. */
 		f->span_id = st->root_span_id;
 		if (d > 0)
-			f->span_id = st->frames[FRAME_IDX(d - 1)].span_id;
+			f->span_id = st->frames[frame_idx(d - 1)].span_id;
 		return 0;
 	}
 
@@ -336,7 +346,7 @@ int BPF_USDT(usdt_function_return, long func_name, long req_file, long lineno,
 	if (d >= MAX_STACK_DEPTH)
 		return 0; /* frame was never recorded */
 
-	f = &st->frames[FRAME_IDX(d)];
+	f = &st->frames[frame_idx(d)];
 	if (!f->start_ns)
 		return 0; /* deeper than max_depth, main or outside the include paths */
 
@@ -348,7 +358,7 @@ int BPF_USDT(usdt_function_return, long func_name, long req_file, long lineno,
 
 	parent = st->root_span_id;
 	if (d > 0)
-		parent = st->frames[FRAME_IDX(d - 1)].span_id;
+		parent = st->frames[frame_idx(d - 1)].span_id;
 
 	e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
 	if (!e) {

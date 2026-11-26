@@ -18,6 +18,12 @@ concurrency:
 jobs:
   build:
     name: build (${{ matrix.arch }})
+    # Pull requests from forks are not built, so third-party code never runs
+    # on our runners or touches the build cache. PRs from branches of this
+    # repository, which only collaborators can push to, still are.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false

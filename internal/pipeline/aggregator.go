@@ -55,6 +55,7 @@ type Stats struct {
 	SpansDroppedShort uint64
 	SpansDroppedCap   uint64
 	SpansOrphaned     uint64
+	Queries           uint64 // query spans buffered, included in SpansBuffered
 	InFlight          int
 }
 
@@ -102,6 +103,8 @@ func (a *Aggregator) Handle(ev *event.Event, now time.Time) {
 		a.onRequestStart(ev, now)
 	case event.TypeFunc:
 		a.onFunction(ev, now)
+	case event.TypeQuery:
+		a.onQuery(ev, now)
 	case event.TypeReqEnd:
 		a.onRequestEnd(ev)
 	}
@@ -125,21 +128,43 @@ func (a *Aggregator) onRequestStart(ev *event.Event, now time.Time) {
 	a.seen[key] = now
 }
 
-func (a *Aggregator) onFunction(ev *event.Event, now time.Time) {
+// request returns the in-flight request a span event belongs to, or nil.
+func (a *Aggregator) request(ev *event.Event, now time.Time) *Request {
 	r, ok := a.reqs[ev.Key()]
 	if !ok {
 		// The request started before the tracer attached, or its state was
 		// already swept. Nothing to attach the span to.
 		a.stats.SpansOrphaned++
-		return
+		return nil
 	}
 	// A recycled pid could in principle land a span on the wrong request;
 	// the kernel-generated trace id makes that detectable.
 	if r.TraceIDHi != ev.TraceIDHi || r.TraceIDLo != ev.TraceIDLo {
 		a.stats.SpansOrphaned++
-		return
+		return nil
 	}
 	a.seen[r.Key] = now
+
+	return r
+}
+
+// admit reports whether r has room for another span, marking the request
+// truncated when it does not.
+func (a *Aggregator) admit(r *Request) bool {
+	if len(r.Spans) >= a.cfg.MaxSpansPerRequest {
+		a.stats.SpansDroppedCap++
+		r.Truncated = true
+		return false
+	}
+
+	return true
+}
+
+func (a *Aggregator) onFunction(ev *event.Event, now time.Time) {
+	r := a.request(ev, now)
+	if r == nil {
+		return
+	}
 
 	// Apply the duration filter before the span cap, so that a flood of
 	// short calls cannot use up the budget and push the slow calls that
@@ -152,9 +177,7 @@ func (a *Aggregator) onFunction(ev *event.Event, now time.Time) {
 		return
 	}
 
-	if len(r.Spans) >= a.cfg.MaxSpansPerRequest {
-		a.stats.SpansDroppedCap++
-		r.Truncated = true
+	if !a.admit(r) {
 		return
 	}
 
@@ -170,6 +193,50 @@ func (a *Aggregator) onFunction(ev *event.Event, now time.Time) {
 		EndNS:    ev.TsEnd,
 	})
 	a.stats.SpansBuffered++
+}
+
+// onQuery turns a mysqlnd query into a span. Queries are not subject to
+// MinSpanDuration, but do count towards MaxSpansPerRequest.
+func (a *Aggregator) onQuery(ev *event.Event, now time.Time) {
+	r := a.request(ev, now)
+	if r == nil {
+		return
+	}
+
+	sql := preparedSQL{
+		text:      ev.Query,
+		truncated: int(ev.QueryLen) > len(ev.Query),
+	}
+	q := &Query{Failed: ev.Failed}
+
+	switch ev.QueryKind {
+	case event.QueryKindPrepare:
+		r.notePrepare(ev.Conn, sql)
+		return
+	case event.QueryKindExecute:
+		sql, _ = r.statementSQL(ev.Conn, ev.StmtID)
+		q.Prepared = true
+		q.StmtID = ev.StmtID
+	case event.QueryKindQuery:
+	default:
+		return
+	}
+	q.Text = sql.text
+	q.Truncated = sql.truncated
+
+	if !a.admit(r) {
+		return
+	}
+	r.Spans = append(r.Spans, Span{
+		SpanID:   ev.SpanID,
+		ParentID: ev.ParentSpanID,
+		Depth:    ev.Depth,
+		StartNS:  ev.TsStart,
+		EndNS:    ev.TsEnd,
+		Query:    q,
+	})
+	a.stats.SpansBuffered++
+	a.stats.Queries++
 }
 
 // maxDropped bounds how many dropped span ids one request remembers for

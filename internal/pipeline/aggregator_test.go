@@ -278,3 +278,114 @@ func TestForgottenDroppedParentFallsBackToRoot(t *testing.T) {
 		t.Errorf("child parent = %#x, want root %#x", got, uint64(rootID))
 	}
 }
+
+func queryEvent(key, span, parent uint64, startNS, endNS uint64, kind uint8, sql string) *event.Event {
+	e := funcEvent(key, span, parent, startNS, endNS, "", 0)
+	e.Type = event.TypeQuery
+	e.QueryKind = kind
+	e.Query = sql
+	e.QueryLen = uint32(len(sql))
+	e.Conn = 0xc0
+
+	return e
+}
+
+func TestQuerySpans(t *testing.T) {
+	sink := &capture{}
+	// A query shorter than -min-span is still kept.
+	agg := New(Config{MinSpanDuration: time.Millisecond}, sink)
+
+	const key = uint64(21)<<32 | 21
+	now := time.Now()
+	agg.Handle(startEvent(key, 0), now)
+	agg.Handle(queryEvent(key, 0xb1, 0xa, 20, 30, event.QueryKindQuery, "SELECT 1"), now)
+	failed := queryEvent(key, 0xb2, 0xa, 40, 50, event.QueryKindQuery, "SELEC 2")
+	failed.Failed = true
+	agg.Handle(failed, now)
+	cut := queryEvent(key, 0xb3, 0xa, 60, 70, event.QueryKindQuery, "SELECT long")
+	cut.QueryLen = 5000
+	agg.Handle(cut, now)
+	agg.Handle(funcEvent(key, 0xa, rootID, 10, uint64(5*time.Millisecond), "repo", 0), now)
+	agg.Handle(endEvent(key, 0, uint64(10*time.Millisecond)), now)
+
+	r := sink.got[0]
+	if len(r.Spans) != 4 {
+		t.Fatalf("got %d spans, want 4: %+v", len(r.Spans), r.Spans)
+	}
+	var qs []*Query
+	for i := range r.Spans {
+		s := &r.Spans[i]
+		if s.Query == nil {
+			continue
+		}
+		if s.ParentID != 0xa {
+			t.Errorf("query parent = %#x, want 0xa", s.ParentID)
+		}
+		qs = append(qs, s.Query)
+	}
+	if len(qs) != 3 {
+		t.Fatalf("got %d queries, want 3", len(qs))
+	}
+	if qs[0].Text != "SELECT 1" || qs[0].Failed || qs[0].Truncated || qs[0].Prepared {
+		t.Errorf("query 1 = %+v", qs[0])
+	}
+	if !qs[1].Failed {
+		t.Errorf("query 2 = %+v, want failed", qs[1])
+	}
+	if !qs[2].Truncated {
+		t.Errorf("query 3 = %+v, want truncated", qs[2])
+	}
+	if s := agg.Stats(); s.Queries != 3 {
+		t.Errorf("Queries = %d, want 3", s.Queries)
+	}
+}
+
+func TestExecuteTakesSQLFromPrepare(t *testing.T) {
+	sink := &capture{}
+	agg := New(Config{}, sink)
+
+	const key = uint64(23)<<32 | 23
+	now := time.Now()
+	exec := func(span uint64, conn uint64, id uint32) {
+		e := queryEvent(key, span, rootID, span, span+5, event.QueryKindExecute, "")
+		e.Conn = conn
+		e.StmtID = id
+		agg.Handle(e, now)
+	}
+	prepare := func(conn uint64, sql string) {
+		e := queryEvent(key, 0, 0, 1, 1, event.QueryKindPrepare, sql)
+		e.Conn = conn
+		agg.Handle(e, now)
+	}
+
+	agg.Handle(startEvent(key, 0), now)
+	prepare(0xc1, "select * from a where id = ?")
+	exec(0x10, 0xc1, 1)
+	prepare(0xc1, "select * from b")
+	exec(0x20, 0xc1, 1) // the earlier statement again, not the pending prepare
+	exec(0x30, 0xc1, 2) // claims "select * from b"
+	prepare(0xc2, "select * from c")
+	exec(0x40, 0xc1, 7) // unknown statement on a connection with nothing pending
+	exec(0x50, 0xc2, 1) // same id on another connection
+	agg.Handle(endEvent(key, 0, 1000), now)
+
+	want := map[uint64]string{
+		0x10: "select * from a where id = ?",
+		0x20: "select * from a where id = ?",
+		0x30: "select * from b",
+		0x40: "",
+		0x50: "select * from c",
+	}
+	r := sink.got[0]
+	if len(r.Spans) != len(want) {
+		t.Fatalf("got %d spans, want %d (prepares must not become spans)", len(r.Spans), len(want))
+	}
+	for _, s := range r.Spans {
+		if got := s.Query.Text; got != want[s.SpanID] {
+			t.Errorf("span %#x: SQL %q, want %q", s.SpanID, got, want[s.SpanID])
+		}
+		if !s.Query.Prepared {
+			t.Errorf("span %#x not marked prepared", s.SpanID)
+		}
+	}
+}

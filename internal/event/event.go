@@ -14,6 +14,14 @@ const (
 	TypeReqStart uint8 = 1
 	TypeReqEnd   uint8 = 2
 	TypeFunc     uint8 = 3
+	TypeQuery    uint8 = 4
+)
+
+// Query kinds, mirroring enum php_query_kind in bpf/php_tracer.h.
+const (
+	QueryKindQuery   uint8 = 1
+	QueryKindPrepare uint8 = 2
+	QueryKindExecute uint8 = 3
 )
 
 // Header flags, mirroring PHP_EV_F_* in bpf/php_tracer.h.
@@ -25,9 +33,13 @@ const (
 // ring buffer hands us so a layout drift fails loudly instead of silently
 // producing garbage spans.
 const (
-	sizeHdr       = 64
-	sizeFuncEvent = 328
-	sizeReqEvent  = 344
+	sizeHdr        = 64
+	sizeFuncEvent  = 328
+	sizeReqEvent   = 344
+	sizeQueryEvent = 1112
+
+	// MaxQueryLen is the SQL buffer in a query record, NUL included.
+	MaxQueryLen = 1024
 )
 
 // Field offsets within a record.
@@ -54,6 +66,14 @@ const (
 	offReqFile    = 72
 	offReqURI     = 200
 	offReqMethod  = 328
+
+	offQueryKind   = 64
+	offQueryFailed = 65
+	offQueryStmtID = 68
+	offQueryLen    = 72
+	offQueryDepth  = 76
+	offQueryConn   = 80
+	offQueryText   = 88
 )
 
 // Event is the decoded form of a single ring buffer record. One Go struct
@@ -74,9 +94,11 @@ type Event struct {
 	SpanID       uint64
 	ParentSpanID uint64
 
+	// TypeFunc and TypeQuery.
+	Depth uint32
+
 	// TypeFunc only.
 	Lineno int32
-	Depth  uint32
 	Func   string
 	Class  string
 
@@ -86,7 +108,17 @@ type Event struct {
 	URI           string
 	Method        string
 
-	// Set for every event type.
+	// TypeQuery only.
+	QueryKind uint8
+	Failed    bool
+	StmtID    uint32
+	Conn      uint64
+	Query     string
+	// QueryLen is the length of the SQL handed to mysqlnd, which exceeds
+	// len(Query) when the kernel had to truncate it.
+	QueryLen uint32
+
+	// Set for request and function events.
 	File string
 }
 
@@ -138,6 +170,22 @@ func (e *Event) Decode(raw []byte) error {
 		e.File = cstr(raw[offReqFile:offReqURI])
 		e.URI = cstr(raw[offReqURI:offReqMethod])
 		e.Method = cstr(raw[offReqMethod:sizeReqEvent])
+
+	case TypeQuery:
+		if len(raw) < sizeQueryEvent {
+			return fmt.Errorf("short query record: %d bytes, want %d", len(raw), sizeQueryEvent)
+		}
+		e.QueryKind = raw[offQueryKind]
+		e.Failed = raw[offQueryFailed] != 0
+		e.StmtID = binary.LittleEndian.Uint32(raw[offQueryStmtID:])
+		e.QueryLen = binary.LittleEndian.Uint32(raw[offQueryLen:])
+		e.Depth = binary.LittleEndian.Uint32(raw[offQueryDepth:])
+		e.Conn = binary.LittleEndian.Uint64(raw[offQueryConn:])
+		// The kernel copies at most MaxQueryLen-1 bytes and terminates
+		// them; the bytes after that are not initialised.
+		text := raw[offQueryText:sizeQueryEvent]
+		text = text[:min(int(e.QueryLen), MaxQueryLen-1)]
+		e.Query = cstr(text)
 
 	default:
 		return fmt.Errorf("unknown event type %d", e.Type)

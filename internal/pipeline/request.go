@@ -4,7 +4,8 @@ package pipeline
 
 import "sort"
 
-// Span is one completed PHP userland function call.
+// Span is one completed PHP userland function call, or a database query when
+// Query is set.
 type Span struct {
 	SpanID   uint64
 	ParentID uint64
@@ -15,6 +16,24 @@ type Span struct {
 	Depth    uint32
 	StartNS  uint64
 	EndNS    uint64
+
+	// Query is set for a MySQL query; Func, Class, File and Lineno are then
+	// empty.
+	Query *Query
+}
+
+// Query describes a MySQL query issued through mysqlnd.
+type Query struct {
+	// Text is the SQL, possibly cut short; see Truncated. Empty for the
+	// execute of a statement whose prepare was not seen.
+	Text string
+	// Truncated is set when Text is only the start of the SQL.
+	Truncated bool
+	// Prepared is set for the execute of a server-side prepared statement.
+	Prepared bool
+	StmtID   uint32
+	// Failed is set when mysqlnd reported an error.
+	Failed bool
 }
 
 // Name renders the span name, "Class::method" for methods and the bare
@@ -61,11 +80,59 @@ type Request struct {
 
 	Spans []Span
 
+	// prepared holds, per connection, the SQL of the last statement prepared
+	// and not yet executed, and stmts the SQL of each statement once its first
+	// execute claimed it. Statement ids are per connection, and PHP closes
+	// statements at the end of a request, so both live as long as the request.
+	prepared map[uint64]preparedSQL
+	stmts    map[stmtKey]preparedSQL
+
 	// dropped maps the id of each span discarded by the duration filter to
 	// its parent id, so that finalize can walk past it. Spans return before
 	// their callers, so when a child arrives it is not yet known whether
 	// its parent will survive.
 	dropped map[uint64]uint64
+}
+
+type stmtKey struct {
+	conn uint64
+	id   uint32
+}
+
+type preparedSQL struct {
+	text      string
+	truncated bool
+}
+
+// notePrepare records the SQL of a statement being prepared on conn.
+func (r *Request) notePrepare(conn uint64, sql preparedSQL) {
+	if r.prepared == nil {
+		r.prepared = make(map[uint64]preparedSQL)
+	}
+	r.prepared[conn] = sql
+}
+
+// statementSQL returns the SQL of statement id on conn. The server assigns
+// the id in its reply to the prepare, which the probes do not see, so the
+// first execute of an id not seen before claims the SQL of the last prepare on
+// that connection. MySQL never reuses a statement id within a connection, so a
+// known id keeps its SQL.
+func (r *Request) statementSQL(conn uint64, id uint32) (preparedSQL, bool) {
+	key := stmtKey{conn, id}
+	if sql, ok := r.stmts[key]; ok {
+		return sql, true
+	}
+	sql, ok := r.prepared[conn]
+	if !ok {
+		return preparedSQL{}, false
+	}
+	delete(r.prepared, conn)
+	if r.stmts == nil {
+		r.stmts = make(map[stmtKey]preparedSQL)
+	}
+	r.stmts[key] = sql
+
+	return sql, true
 }
 
 // rememberDropped records a span dropped by the duration filter. Once limit
@@ -145,7 +212,9 @@ func (r *Request) finalize(minSpanNS uint64) int {
 
 	kept := make(map[uint64]bool, len(r.Spans))
 	for i := range r.Spans {
-		kept[r.Spans[i].SpanID] = r.Spans[i].DurationNS() >= minSpanNS
+		// Queries were asked for explicitly and are rarely the noise the
+		// duration filter is for, so they are always kept.
+		kept[r.Spans[i].SpanID] = r.Spans[i].Query != nil || r.Spans[i].DurationNS() >= minSpanNS
 	}
 
 	// Resolve each span id to the closest ancestor that survives, memoised so
@@ -195,6 +264,8 @@ func (r *Request) finalize(minSpanNS uint64) int {
 	}
 	r.Spans = out
 	r.dropped = nil
+	r.prepared = nil
+	r.stmts = nil
 
 	// A callee always starts at or after its caller, so ordering by start time
 	// (depth breaking ties for zero-cost frames) yields a valid topological

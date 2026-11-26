@@ -113,3 +113,45 @@ func TestDecodeFullWidthString(t *testing.T) {
 		t.Errorf("len(Func) = %d, want %d", len(ev.Func), len(name))
 	}
 }
+
+func TestDecodeQueryEvent(t *testing.T) {
+	raw := buildRecord(sizeQueryEvent, TypeQuery)
+	raw[offQueryKind] = QueryKindExecute
+	raw[offQueryFailed] = 1
+	binary.LittleEndian.PutUint32(raw[offQueryStmtID:], 3)
+	binary.LittleEndian.PutUint32(raw[offQueryLen:], 8)
+	binary.LittleEndian.PutUint32(raw[offQueryDepth:], 12)
+	binary.LittleEndian.PutUint64(raw[offQueryConn:], 0x7f0000001000)
+	// Garbage past the terminator must not leak into the text.
+	copy(raw[offQueryText:], "SELECT 1\x00junk")
+
+	var ev Event
+	if err := ev.Decode(raw); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if ev.QueryKind != QueryKindExecute || !ev.Failed || ev.StmtID != 3 || ev.Depth != 12 {
+		t.Errorf("fields = kind %d failed %v stmt %d depth %d", ev.QueryKind, ev.Failed, ev.StmtID, ev.Depth)
+	}
+	if ev.Conn != 0x7f0000001000 {
+		t.Errorf("Conn = %#x", ev.Conn)
+	}
+	if ev.Query != "SELECT 1" || ev.QueryLen != 8 {
+		t.Errorf("Query = %q (len %d)", ev.Query, ev.QueryLen)
+	}
+}
+
+func TestDecodeQueryEventStopsAtQueryLen(t *testing.T) {
+	raw := buildRecord(sizeQueryEvent, TypeQuery)
+	raw[offQueryKind] = QueryKindQuery
+	binary.LittleEndian.PutUint32(raw[offQueryLen:], 6)
+	// Uninitialised ring buffer memory: no terminator right after the text.
+	copy(raw[offQueryText:], "SELECTxxxxxxxx")
+
+	var ev Event
+	if err := ev.Decode(raw); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if ev.Query != "SELECT" {
+		t.Errorf("Query = %q, want SELECT", ev.Query)
+	}
+}

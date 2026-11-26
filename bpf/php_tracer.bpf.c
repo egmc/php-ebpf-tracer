@@ -382,3 +382,231 @@ int BPF_USDT(usdt_function_return, long func_name, long req_file, long lineno,
 
 	return 0;
 }
+
+/*
+ * MySQL queries, from uprobes on mysqlnd. mysqlnd has no USDT markers and is
+ * usually stripped, but it exports its method tables, so userspace resolves the
+ * functions below from those tables and attaches to their file offsets:
+ *
+ *   conn_data::query(conn, const char *query, size_t len)
+ *       mysqli_query, PDO::query/exec and emulated prepares. Returns once the
+ *       result header has been read.
+ *   command::stmt_prepare(conn, MYSQLND_CSTRING query)
+ *   command::stmt_execute(conn, MYSQLND_CSTRING payload)
+ *       Native prepared statements. Both only send the command; the payload of
+ *       COM_STMT_EXECUTE starts with the 4 byte statement id.
+ *   conn_data::query_read_result_set_header(conn, stmt)
+ *       Reads the response, so its return ends an execute.
+ *
+ * A MYSQLND_CSTRING is a 16 byte struct and is passed in the second and third
+ * argument registers on x86_64 and arm64.
+ */
+
+/* Query in flight on a thread, from the entry probe to the one that ends it. */
+struct php_query_pending {
+	__u64 start_ns;
+	__u64 span_id;
+	__u64 parent_span_id;
+	__u64 conn;
+	__u64 query; /* user pointer, read when the query ends */
+	__u32 query_len;
+	__u32 stmt_id;
+	__u32 depth;
+	__u8  kind;
+	__u8  pad[3];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 8192);
+	__type(key, __u64); /* bpf_get_current_pid_tgid() */
+	__type(value, struct php_query_pending);
+} queries SEC(".maps");
+
+/* Returns the span a query issued now hangs under: the innermost frame on the
+ * shadow stack. Frames below max_depth always carry a valid span_id, their own
+ * or their nearest reported ancestor's; deeper ones are never written. */
+static __always_inline __u64 current_parent(const struct php_req_state *st)
+{
+	__u32 d = st->depth;
+
+	if (d > max_depth)
+		d = max_depth;
+	if (d > MAX_STACK_DEPTH)
+		d = MAX_STACK_DEPTH;
+	if (d == 0)
+		return st->root_span_id;
+
+	return st->frames[frame_idx(d - 1)].span_id;
+}
+
+/* Copies up to MAX_QUERY_LEN - 1 bytes of SQL. The text is length delimited,
+ * not NUL terminated, so this cannot use bpf_probe_read_user_str. */
+static __always_inline void read_query(char *dst, __u64 src, __u32 len)
+{
+	__u32 n = len;
+
+	dst[0] = '\0';
+	if (!src || !len)
+		return;
+	if (n > MAX_QUERY_LEN - 1)
+		n = MAX_QUERY_LEN - 1;
+	barrier_var(n);
+	n &= MAX_QUERY_LEN - 1;
+	if (bpf_probe_read_user(dst, n, (const void *)(unsigned long)src))
+		n = 0;
+	dst[n] = '\0';
+}
+
+static __always_inline void fill_query(struct php_query_event *e, __u64 id,
+				       const struct php_req_state *st, __u8 kind)
+{
+	fill_hdr(&e->hdr, PHP_EV_QUERY, id, st);
+	e->kind = kind;
+	e->failed = 0;
+	e->pad0 = 0;
+	e->stmt_id = 0;
+	e->query_len = 0;
+	e->depth = st->depth;
+	e->conn = 0;
+}
+
+static __always_inline int query_begin(__u8 kind, __u64 conn, __u64 query,
+				       __u64 len, __u32 stmt_id)
+{
+	__u64 id = bpf_get_current_pid_tgid();
+	struct php_query_pending p = {};
+	struct php_req_state *st;
+
+	st = bpf_map_lookup_elem(&requests, &id);
+	if (!st)
+		return 0; /* not inside a traced request */
+
+	p.span_id = rand_u64();
+	p.parent_span_id = current_parent(st);
+	p.conn = conn;
+	p.query = query;
+	p.query_len = len > 0xffffffff ? 0xffffffff : (__u32)len;
+	p.stmt_id = stmt_id;
+	p.depth = st->depth;
+	p.kind = kind;
+	p.start_ns = bpf_ktime_get_ns();
+	bpf_map_update_elem(&queries, &id, &p, BPF_ANY);
+
+	return 0;
+}
+
+/* Ends the query in flight on this thread if it is of the given kind. */
+static __always_inline int query_end(__u8 kind, bool failed)
+{
+	__u64 id = bpf_get_current_pid_tgid();
+	__u64 now = bpf_ktime_get_ns();
+	struct php_query_pending *p;
+	struct php_query_event *e;
+	struct php_req_state *st;
+
+	p = bpf_map_lookup_elem(&queries, &id);
+	if (!p || p->kind != kind)
+		return 0;
+
+	st = bpf_map_lookup_elem(&requests, &id);
+	if (!st)
+		goto out;
+
+	e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+	if (!e) {
+		st->dropped++;
+		st->flags |= PHP_EV_F_TRUNCATED;
+		goto out;
+	}
+
+	fill_query(e, id, st, kind);
+	e->hdr.ts_start = p->start_ns;
+	e->hdr.ts_end = now;
+	e->hdr.span_id = p->span_id;
+	e->hdr.parent_span_id = p->parent_span_id;
+	e->failed = failed;
+	e->stmt_id = p->stmt_id;
+	e->query_len = p->query_len;
+	e->depth = p->depth;
+	e->conn = p->conn;
+	/* Still valid: the caller owns the buffer until the call returns. */
+	read_query(e->query, p->query, p->query_len);
+	st->emitted++;
+	bpf_ringbuf_submit(e, 0);
+
+out:
+	bpf_map_delete_elem(&queries, &id);
+
+	return 0;
+}
+
+SEC("uprobe")
+int BPF_UPROBE(uprobe_conn_query, void *conn, const char *query, __u64 len)
+{
+	return query_begin(PHP_Q_QUERY, (__u64)conn, (__u64)query, len, 0);
+}
+
+SEC("uretprobe")
+int BPF_URETPROBE(uretprobe_conn_query, long ret)
+{
+	return query_end(PHP_Q_QUERY, ret != 0);
+}
+
+SEC("uprobe")
+int BPF_UPROBE(uprobe_stmt_prepare, void *conn, const char *query, __u64 len)
+{
+	__u64 id = bpf_get_current_pid_tgid();
+	struct php_query_event *e;
+	struct php_req_state *st;
+
+	st = bpf_map_lookup_elem(&requests, &id);
+	if (!st)
+		return 0;
+
+	e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+	if (!e) {
+		st->dropped++;
+		st->flags |= PHP_EV_F_TRUNCATED;
+		return 0;
+	}
+
+	fill_query(e, id, st, PHP_Q_PREPARE);
+	e->hdr.ts_start = bpf_ktime_get_ns();
+	e->hdr.ts_end = e->hdr.ts_start;
+	e->hdr.span_id = 0;
+	e->hdr.parent_span_id = 0;
+	e->query_len = len > 0xffffffff ? 0xffffffff : (__u32)len;
+	e->conn = (__u64)conn;
+	read_query(e->query, (__u64)query, e->query_len);
+	bpf_ringbuf_submit(e, 0);
+
+	return 0;
+}
+
+SEC("uprobe")
+int BPF_UPROBE(uprobe_stmt_execute, void *conn, const void *payload, __u64 len)
+{
+	__u32 stmt_id = 0;
+
+	if (payload && len >= sizeof(stmt_id))
+		bpf_probe_read_user(&stmt_id, sizeof(stmt_id), payload);
+
+	return query_begin(PHP_Q_EXECUTE, (__u64)conn, 0, 0, stmt_id);
+}
+
+/* Sending failed: no response will be read for this execute. */
+SEC("uretprobe")
+int BPF_URETPROBE(uretprobe_stmt_execute, long ret)
+{
+	if (ret == 0)
+		return 0;
+
+	return query_end(PHP_Q_EXECUTE, true);
+}
+
+SEC("uretprobe")
+int BPF_URETPROBE(uretprobe_read_result_header, long ret)
+{
+	return query_end(PHP_Q_EXECUTE, ret != 0);
+}

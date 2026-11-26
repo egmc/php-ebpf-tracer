@@ -14,6 +14,8 @@ import (
 	"unsafe"
 
 	bpf "github.com/aquasecurity/libbpfgo"
+
+	"github.com/egmc/php-ebpf-tracer/internal/mysqlnd"
 )
 
 // Probe names as they appear in the ELF SDT notes of a PHP built with
@@ -84,6 +86,9 @@ type Config struct {
 	// span; the callees of a skipped function are attached to its nearest
 	// reported ancestor. Empty traces every file. At most MaxIncludePaths.
 	IncludePaths []string
+	// MySQL, when set, attaches uprobes to these mysqlnd functions and
+	// reports each query as a span under the PHP frame that issued it.
+	MySQL *mysqlnd.Offsets
 
 	// ProcRoot is the procfs mount used for process discovery.
 	ProcRoot string
@@ -124,6 +129,9 @@ type Tracer struct {
 	// links is keyed by the pid the probes were attached with; AttachAllPIDs
 	// for a global attach.
 	links map[int][]*bpf.BPFLink
+	// queryLinks are the mysqlnd uprobes. They are attached once for every
+	// process, so Rescan leaves them alone.
+	queryLinks []*bpf.BPFLink
 	// scanning is set when per-process discovery is in use.
 	scanning bool
 	closed   bool
@@ -183,6 +191,9 @@ func (t *Tracer) load() error {
 	}
 
 	if err := t.attachInitial(); err != nil {
+		return err
+	}
+	if err := t.attachQueries(); err != nil {
 		return err
 	}
 
@@ -344,6 +355,50 @@ func (t *Tracer) attachPID(pid int) error {
 	return nil
 }
 
+// attachQueries puts uprobes on mysqlnd. Unlike USDT markers in a PIE, a
+// uprobe at a file offset works with pid -1 on every kernel, so there is no
+// per-process attach to keep in step with scanning.
+func (t *Tracer) attachQueries() error {
+	m := t.cfg.MySQL
+	if m == nil {
+		return nil
+	}
+	pid := AttachAllPIDs
+	if t.cfg.PID > 0 {
+		pid = t.cfg.PID
+	}
+
+	for _, p := range []struct {
+		prog   string
+		offset uint64
+		ret    bool
+	}{
+		{"uprobe_conn_query", m.ConnQuery, false},
+		{"uretprobe_conn_query", m.ConnQuery, true},
+		{"uprobe_stmt_prepare", m.StmtPrepare, false},
+		{"uprobe_stmt_execute", m.StmtExecute, false},
+		{"uretprobe_stmt_execute", m.StmtExecute, true},
+		{"uretprobe_read_result_header", m.ReadResultHeader, true},
+	} {
+		prog, err := t.module.GetProgram(p.prog)
+		if err != nil {
+			return fmt.Errorf("find BPF program %s: %w", p.prog, err)
+		}
+		attach := prog.AttachUprobe
+		if p.ret {
+			attach = prog.AttachURetprobe
+		}
+		link, err := attach(pid, m.Path, p.offset)
+		if err != nil {
+			return fmt.Errorf("attach %s to %s+%#x: %w", p.prog, m.Path, p.offset, err)
+		}
+		t.queryLinks = append(t.queryLinks, link)
+	}
+	t.log.Debug("attached mysqlnd uprobes", "path", m.Path, "links", len(t.queryLinks))
+
+	return nil
+}
+
 // Rescan attaches to PHP processes that appeared since the last call and
 // detaches from those that are gone. It is a no-op outside scan mode.
 //
@@ -471,6 +526,8 @@ func (t *Tracer) releaseUnstarted() {
 	for pid := range t.links {
 		t.destroyLinksFor(pid)
 	}
+	destroyLinks(t.log, t.queryLinks)
+	t.queryLinks = nil
 	if t.module != nil {
 		t.module.Close()
 		t.module = nil

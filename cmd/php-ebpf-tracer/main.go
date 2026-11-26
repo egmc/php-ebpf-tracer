@@ -23,6 +23,7 @@ import (
 	"github.com/egmc/php-ebpf-tracer/internal/bpftracer"
 	"github.com/egmc/php-ebpf-tracer/internal/event"
 	"github.com/egmc/php-ebpf-tracer/internal/monoclock"
+	"github.com/egmc/php-ebpf-tracer/internal/mysqlnd"
 	"github.com/egmc/php-ebpf-tracer/internal/otelexport"
 	"github.com/egmc/php-ebpf-tracer/internal/pipeline"
 )
@@ -68,6 +69,10 @@ type options struct {
 	maxDepth       uint
 	bpfMinFunc     time.Duration
 	includePaths   stringList
+
+	traceMySQL bool
+	mysqlnd    string
+	rawQueries bool
 
 	minDuration   time.Duration
 	minSpan       time.Duration
@@ -125,6 +130,13 @@ func parseFlags() *options {
 	flag.Var(&o.includePaths, "include-path",
 		"only produce spans for functions defined in files under this directory, e.g. /var/www/app/src; "+
 			"matched in the kernel, repeatable (default: every file)")
+
+	flag.BoolVar(&o.traceMySQL, "trace-mysql", false,
+		"report MySQL queries made through mysqlnd (mysqli, PDO) as spans, using uprobes on mysqlnd")
+	flag.StringVar(&o.mysqlnd, "mysqlnd", "",
+		"mysqlnd.so, or the PHP binary when mysqlnd is built in (default: found automatically)")
+	flag.BoolVar(&o.rawQueries, "mysql-raw-query", false,
+		"export SQL as issued; by default string and numeric literals are replaced with ?")
 
 	flag.DurationVar(&o.minDuration, "min-duration", 100*time.Millisecond,
 		"export a trace only when request__shutdown minus request__startup is at least this long (0 = export everything)")
@@ -238,6 +250,7 @@ func run() error {
 		ServiceVersion:     o.serviceVersion,
 		ResourceAttributes: o.resourceAttrs,
 		QueueSize:          o.queueSize,
+		RawQueries:         o.rawQueries,
 		Clock:              clock,
 		Logger:             log,
 	})
@@ -252,6 +265,13 @@ func run() error {
 		}
 	}()
 
+	var mysql *mysqlnd.Offsets
+	if o.traceMySQL {
+		if mysql, err = resolveMySQL(o); err != nil {
+			return err
+		}
+	}
+
 	tracer, err := bpftracer.New(bpftracer.Config{
 		ObjectPath:      o.bpfObject,
 		Binaries:        o.binaries,
@@ -262,6 +282,7 @@ func run() error {
 		MaxDepth:        uint32(o.maxDepth),
 		MinFuncDuration: o.bpfMinFunc,
 		IncludePaths:    o.includePaths,
+		MySQL:           mysql,
 		Logger:          log,
 	})
 	if err != nil {
@@ -287,6 +308,7 @@ func run() error {
 		"attached_processes", tracer.AttachedProcesses(),
 		"functions", o.traceFunctions,
 		"include_paths", o.includePaths.String(),
+		"mysql", mysqlPath(mysql),
 		"max_depth", o.maxDepth,
 		"min_duration", o.minDuration,
 		"otlp", o.otlpProtocol,
@@ -380,11 +402,37 @@ func loop(ctx context.Context, o *options, log *slog.Logger, tracer *bpftracer.T
 					"spans_dropped_short", s.SpansDroppedShort,
 					"spans_dropped_cap", s.SpansDroppedCap,
 					"spans_orphaned", s.SpansOrphaned,
+					"queries", s.Queries,
 					"in_flight", s.InFlight,
 					"attached_processes", tracer.AttachedProcesses())
 			}
 		}
 	}
+}
+
+// resolveMySQL finds mysqlnd and the functions the query probes attach to.
+func resolveMySQL(o *options) (*mysqlnd.Offsets, error) {
+	path := o.mysqlnd
+	if path == "" {
+		var err error
+		if path, err = mysqlnd.Find(o.binaries); err != nil {
+			return nil, fmt.Errorf("-trace-mysql: %w (use -mysqlnd)", err)
+		}
+	}
+	offsets, err := mysqlnd.Resolve(path)
+	if err != nil {
+		return nil, fmt.Errorf("-trace-mysql: %w", err)
+	}
+
+	return offsets, nil
+}
+
+func mysqlPath(o *mysqlnd.Offsets) string {
+	if o == nil {
+		return "off"
+	}
+
+	return o.Path
 }
 
 func newLogger(level string) (*slog.Logger, error) {

@@ -25,10 +25,24 @@
 _Static_assert((MAX_STACK_DEPTH & (MAX_STACK_DEPTH - 1)) == 0,
 	       "MAX_STACK_DEPTH must be a power of two");
 
+/* Bytes of SQL text copied per query, NUL included. Must stay a power of two:
+ * the copy length is masked with MAX_QUERY_LEN - 1 for the verifier. */
+#define MAX_QUERY_LEN   1024
+_Static_assert((MAX_QUERY_LEN & (MAX_QUERY_LEN - 1)) == 0,
+	       "MAX_QUERY_LEN must be a power of two");
+
 enum php_event_type {
 	PHP_EV_REQ_START = 1,
 	PHP_EV_REQ_END   = 2,
 	PHP_EV_FUNC      = 3,
+	PHP_EV_QUERY     = 4,
+};
+
+/* php_query_event.kind */
+enum php_query_kind {
+	PHP_Q_QUERY   = 1, /* mysqlnd conn_data::query: SQL sent and result header read */
+	PHP_Q_PREPARE = 2, /* COM_STMT_PREPARE sent; carries the SQL, not a span */
+	PHP_Q_EXECUTE = 3, /* COM_STMT_EXECUTE sent and result header read */
 };
 
 /* Include paths: when any are set, only functions defined in a file starting
@@ -74,6 +88,19 @@ struct php_req_event {
 	char  file[MAX_FILE_LEN];
 	char  uri[MAX_URI_LEN];
 	char  method[MAX_METHOD_LEN];
+};
+
+/* 1112 bytes */
+struct php_query_event {
+	struct php_ev_hdr hdr;
+	__u8  kind;      /* enum php_query_kind */
+	__u8  failed;    /* mysqlnd returned FAIL */
+	__u16 pad0;
+	__u32 stmt_id;   /* PHP_Q_EXECUTE only */
+	__u32 query_len; /* length passed to mysqlnd; more than fits in query[] when truncated */
+	__u32 depth;     /* PHP call depth the query was issued at */
+	__u64 conn;      /* MYSQLND_CONN_DATA *, pairs a prepare with its executes */
+	char  query[MAX_QUERY_LEN];
 };
 
 #endif /* __PHP_TRACER_H */

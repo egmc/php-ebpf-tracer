@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -64,6 +65,10 @@ type Config struct {
 	// exceed the largest request; spans that do not fit are silently dropped
 	// by the SDK. 0 keeps the SDK default (2048).
 	QueueSize int
+
+	// RawQueries exports SQL as captured. By default string and numeric
+	// literals are replaced with ?, since they may hold personal data.
+	RawQueries bool
 
 	Clock  monoclock.Clock
 	Logger *slog.Logger
@@ -262,12 +267,21 @@ func (e *Exporter) Export(r *pipeline.Request) {
 			parentCtx = rootCtx
 		}
 
+		name, kind, attrs := s.Name(), trace.SpanKindInternal, spanAttributes(s)
+		if s.Query != nil {
+			name, attrs = e.queryNameAndAttributes(s)
+			kind = trace.SpanKindClient
+		}
+
 		e.gen.spanID = spanIDFrom(s.SpanID)
-		childCtx, span := e.tracer.Start(parentCtx, s.Name(),
-			trace.WithSpanKind(trace.SpanKindInternal),
+		childCtx, span := e.tracer.Start(parentCtx, name,
+			trace.WithSpanKind(kind),
 			trace.WithTimestamp(e.clock.Time(s.StartNS)),
-			trace.WithAttributes(spanAttributes(s)...),
+			trace.WithAttributes(attrs...),
 		)
+		if s.Query != nil && s.Query.Failed {
+			span.SetStatus(codes.Error, "mysqlnd returned FAIL")
+		}
 		ctxByID[s.SpanID] = childCtx
 		span.End(trace.WithTimestamp(e.clock.Time(s.EndNS)))
 	}
@@ -313,6 +327,46 @@ func spanAttributes(s *pipeline.Span) []attribute.KeyValue {
 	}
 
 	return attrs
+}
+
+// queryNameAndAttributes describes a MySQL query following the OTel database
+// conventions. db.system is the older name of db.system.name, still the one
+// many backends, Grafana's span metrics among them, key on.
+func (e *Exporter) queryNameAndAttributes(s *pipeline.Span) (string, []attribute.KeyValue) {
+	q := s.Query
+	attrs := []attribute.KeyValue{
+		attribute.String("db.system.name", "mysql"),
+		attribute.String("db.system", "mysql"),
+		attribute.Int("php.call.depth", int(s.Depth)),
+	}
+
+	text := q.Text
+	if !e.cfg.RawQueries {
+		text = sanitizeSQL(text)
+	}
+	if text != "" {
+		attrs = append(attrs, attribute.String("db.query.text", text))
+	}
+	if q.Truncated {
+		attrs = append(attrs, attribute.Bool("php.db.query.truncated", true))
+	}
+	if q.Prepared {
+		attrs = append(attrs,
+			attribute.String("php.mysqlnd.command", "stmt_execute"),
+			attribute.Int64("php.mysqlnd.stmt_id", int64(q.StmtID)))
+	} else {
+		attrs = append(attrs, attribute.String("php.mysqlnd.command", "query"))
+	}
+
+	// The span name is the operation, as the conventions ask when no
+	// low-cardinality summary of the query is available.
+	name := "mysql"
+	if op := operationName(q.Text); op != "" {
+		name = op
+		attrs = append(attrs, attribute.String("db.operation.name", op))
+	}
+
+	return name, attrs
 }
 
 // Shutdown flushes pending spans and tears the provider down.

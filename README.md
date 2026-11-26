@@ -27,6 +27,8 @@ OTLP で送信する自動計装エージェントです。PHP 側にはエク�
 - **テールサンプリング**: `request__shutdown - request__startup` の差分が
   `-min-duration` 以上のリクエストだけを OTLP で送信します。遅いリクエストの
   スパンはすべて残り、速いリクエストは 1 バイトも送信されません。
+- **MySQL クエリ** (`-trace-mysql`): mysqlnd に uprobe を張り、mysqli / PDO の
+  クエリを、それを発行した PHP 関数の子スパンとして送ります。
 - **ID はカーネルで採番**: trace id / span id を BPF 側で生成し、Go 側は
   そのまま OTel スパンに載せます。
 
@@ -157,6 +159,9 @@ Basic 認証以外 (Bearer トークン、マルチテナントの `X-Scope-OrgI
 | `-max-spans` | `5000` | 1 リクエストあたりのスパン数上限 |
 | `-export-queue-size` | `4 × -max-spans` (最低 2048) | OTLP エクスポータが送信待ちで抱えられるスパン数。溢れた分は SDK が捨てる |
 | `-trace-functions` | `true` | `false` にすると関数プローブを張らず、リクエストスパンだけにする |
+| `-trace-mysql` | `false` | mysqlnd 経由の MySQL クエリをスパンにする ([MySQL クエリ](#mysql-クエリ)) |
+| `-mysqlnd` | (自動検出) | mysqlnd.so のパス。mysqlnd が PHP に静的リンクされているならその実行ファイル |
+| `-mysql-raw-query` | `false` | SQL をそのまま送る。既定では文字列・数値リテラルを `?` に置き換える |
 | `-otlp-protocol` | `grpc` | `grpc` / `http` / `stdout` |
 | `-otlp-endpoint` | (空) | `host:port` か `https://host/path` 形式の URL。URL なら TLS はスキームで決まり、http ではパスがそのまま使われる。空なら `OTEL_EXPORTER_OTLP_*` 環境変数に従う |
 | `-otlp-insecure` | `true` | `host:port` 指定時に TLS を使わない。リモートに送るときは `-otlp-insecure=false` |
@@ -192,6 +197,40 @@ php-ebpf-tracer \
   減るのは ring buffer に書くレコードと、Go 側の処理量です。
 - パスは最大 8 件、長さは 127 バイトまでです。カーネルはパスを 127 バイトまでしか
   読まないため、それより深いパスは判定できません。
+
+## MySQL クエリ
+
+`-trace-mysql` を指定すると、mysqli / PDO (pdo_mysql) が mysqlnd 経由で発行した
+クエリを、発行元の PHP 関数の子スパン (span kind `CLIENT`) として送ります。
+
+```sh
+sudo ./build/php-ebpf-tracer -binary /usr/sbin/php-fpm8.5 -trace-mysql
+```
+
+mysqlnd には USDT がなく、ディストリビューションのパッケージはシンボルも
+落としてありますが、メソッドテーブル (`mysqlnd_mysqlnd_conn_data_methods`,
+`mysqlnd_mysqlnd_command_methods`) は公開シンボルです。起動時にテーブルの
+該当スロットを `R_*_RELATIVE` 再配置から読み、関数のファイルオフセットに
+uprobe を張ります。
+
+| 計測区間 | 対象 |
+| --- | --- |
+| `conn_data::query` の入口〜戻り | `mysqli_query`, `PDO::query` / `exec`, エミュレートされた prepare |
+| `command::stmt_execute` の入口〜`query_read_result_set_header` の戻り | ネイティブの prepared statement の実行 |
+
+- どちらも結果ヘッダの受信までで、行の fetch は含みません。
+- ネイティブ prepare の SQL は `command::stmt_prepare` で取り、同じ接続で
+  初めて見る statement id の execute に結び付けます (サーバが返す id は
+  プローブからは見えないため)。prepare 自体はスパンにしません。
+- 属性は OTel の DB 規約に従い `db.system.name` (と旧名の `db.system`) =
+  `mysql`, `db.query.text`, `db.operation.name` を付けます。スパン名は
+  `SELECT` などの操作名です。mysqlnd が失敗を返したクエリはステータスが Error に
+  なります。
+- SQL はカーネルで先頭 1023 バイトまでコピーし、切れた場合は
+  `php.db.query.truncated=true` を付けます。
+- クエリスパンは `-min-span` の対象外ですが、`-max-spans` には数えます。
+- 対応しているのはメソッドテーブルの並びを確認済みの mysqlnd (PHP 8.5) だけです。
+  テーブルのサイズが違う場合は起動時にエラーになります。
 
 ## 送信判定 (テールサンプリング) の仕組み
 
@@ -254,7 +293,7 @@ entry 側で文字列をコピーするのは、関数名が `main` かどうか
 
 ## 制限事項
 
-- 対象は **PHP のユーザーランド関数のみ**です。`function__entry` は内部関数
+- 関数スパンの対象は **PHP のユーザーランド関数のみ**です。`function__entry` は内部関数
   (`usleep` 等) では発火しません。
 - `main` (スクリプトのトップレベルのコード) はスパンにしません。エントリスクリプトは
   リクエストスパンが表しており、それ以外はほぼオートローダによるクラスファイルの
@@ -275,6 +314,7 @@ internal/event/         ring buffer レコードのデコード (cgo なし)
 internal/bpftracer/     libbpfgo でのロード・アタッチ・ポーリング
 internal/pipeline/      リクエスト単位のバッファリングと閾値判定
 internal/otelexport/    OTel スパン組み立てと OTLP 送信
+internal/mysqlnd/       mysqlnd のメソッドテーブルから uprobe の位置を求める (cgo なし)
 internal/monoclock/     CLOCK_MONOTONIC → 壁時計の変換
 cmd/php-ebpf-tracer/    CLI
 docker/                 PHP (dtrace 有効) とトレーサのイメージ

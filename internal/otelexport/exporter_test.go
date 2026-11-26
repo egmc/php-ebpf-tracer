@@ -266,3 +266,94 @@ func spanNames(spans tracetest.SpanStubs) []string {
 
 	return out
 }
+
+func TestExportQuerySpans(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		ctx := context.Background()
+		sink := tracetest.NewInMemoryExporter()
+
+		exp, err := newWith(ctx, Config{ServiceName: "php-test", RawQueries: raw}, sink)
+		if err != nil {
+			t.Fatalf("newWith: %v", err)
+		}
+
+		const rootID, funcID = uint64(0x10), uint64(0x20)
+		exp.Export(&pipeline.Request{
+			TraceIDHi: 1, TraceIDLo: 2, RootSpanID: rootID,
+			StartNS: 1_000, EndNS: 9_000, URI: "/", Method: "GET",
+			Spans: []pipeline.Span{
+				{SpanID: funcID, ParentID: rootID, Func: "get_option", StartNS: 2_000, EndNS: 8_000},
+				{SpanID: 0x30, ParentID: funcID, StartNS: 3_000, EndNS: 4_000, Depth: 5,
+					Query: &pipeline.Query{Text: "SELECT v FROM o WHERE k = 'siteurl'"}},
+				{SpanID: 0x40, ParentID: funcID, StartNS: 5_000, EndNS: 6_000,
+					Query: &pipeline.Query{Text: "select * from t where id = ?", Prepared: true, StmtID: 3,
+						Failed: true, Truncated: true}},
+			},
+		})
+		if err := exp.ForceFlush(ctx); err != nil {
+			t.Fatalf("ForceFlush: %v", err)
+		}
+		t.Cleanup(func() { _ = exp.Shutdown(ctx) })
+
+		// Both queries are named after their operation.
+		names := map[string]int{}
+		for _, s := range sink.GetSpans() {
+			names[s.Name]++
+		}
+		if names["SELECT"] != 2 || len(sink.GetSpans()) != 4 {
+			t.Fatalf("raw=%v: spans %v, want GET /, get_option and two SELECT", raw, spanNames(sink.GetSpans()))
+		}
+
+		var plain, prepared tracetest.SpanStub
+		for _, s := range sink.GetSpans() {
+			switch s.SpanContext.SpanID().String() {
+			case "0000000000000030":
+				plain = s
+			case "0000000000000040":
+				prepared = s
+			}
+		}
+
+		attrs := attrMap(plain)
+		wantText := "SELECT v FROM o WHERE k = ?"
+		if raw {
+			wantText = "SELECT v FROM o WHERE k = 'siteurl'"
+		}
+		if attrs["db.query.text"] != wantText {
+			t.Errorf("raw=%v: db.query.text = %q, want %q", raw, attrs["db.query.text"], wantText)
+		}
+		for k, want := range map[string]string{
+			"db.system.name":      "mysql",
+			"db.operation.name":   "SELECT",
+			"php.mysqlnd.command": "query",
+		} {
+			if attrs[k] != want {
+				t.Errorf("%s = %q, want %q", k, attrs[k], want)
+			}
+		}
+		if plain.SpanKind.String() != "client" {
+			t.Errorf("span kind = %s, want client", plain.SpanKind)
+		}
+		if got := plain.Parent.SpanID().String(); got != "0000000000000020" {
+			t.Errorf("query parent = %s, want get_option", got)
+		}
+
+		pattrs := attrMap(prepared)
+		if pattrs["php.mysqlnd.command"] != "stmt_execute" || pattrs["php.mysqlnd.stmt_id"] != "3" ||
+			pattrs["php.db.query.truncated"] != "true" {
+			t.Errorf("prepared attrs = %v", pattrs)
+		}
+		if prepared.Status.Code.String() != "Error" {
+			t.Errorf("failed query status = %s, want Error", prepared.Status.Code)
+		}
+	}
+}
+
+func attrMap(s tracetest.SpanStub) map[string]string {
+	m := map[string]string{}
+	for _, kv := range s.Attributes {
+		m[string(kv.Key)] = kv.Value.Emit()
+	}
+
+	return m
+}

@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+// Copyright (c) 2026 egmc
 /*
  * php_tracer.bpf.c -- USDT based auto-instrumentation for PHP.
  *
@@ -30,7 +31,8 @@
 
 #include "php_tracer.h"
 
-char LICENSE[] SEC("license") = "GPL";
+/* GPL-compatible, as the kernel requires for bpf_probe_read_user(). */
+char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 /* Index into php_req_state.frames. The barrier keeps clang from dropping the
  * mask: after a `d >= MAX_STACK_DEPTH` check it knows the mask is a no-op and

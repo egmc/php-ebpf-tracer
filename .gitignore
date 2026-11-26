@@ -1,1 +1,3 @@
 /build/
+/dist/
+/internal/bpfobj/php_tracer.bpf.o

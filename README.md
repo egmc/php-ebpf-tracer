@@ -98,6 +98,17 @@ tar -xzf php-ebpf-tracer-v0.1.0-linux-amd64.tar.gz
 sudo ./php-ebpf-tracer-v0.1.0-linux-amd64/php-ebpf-tracer -binary "$(which php-fpm)" ...
 ```
 
+アーカイブは `SHA256SUMS` で照合できるほか、このリポジトリの GitHub Actions で
+ビルドされたことを署名付きの build provenance で確認できます
+([GitHub CLI](https://cli.github.com/) が必要)。
+
+```sh
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify php-ebpf-tracer-v0.1.0-linux-amd64.tar.gz --repo egmc/php-ebpf-tracer
+```
+
+provenance は v0.1.0 より後のリリースから付きます。
+
 ## 手動ビルド (Linux)
 
 BPF オブジェクトはビルド時にバイナリへ埋め込まれます (`internal/bpfobj`)。そのため

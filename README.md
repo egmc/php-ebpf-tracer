@@ -89,7 +89,7 @@ PHP バイナリは named volume 経由で共有し、PHP プロセスもトレ�
 
 ## インストール (リリースバイナリ)
 
-GitHub Releases の `php-ebpf-tracer-<version>-linux-<amd64|arm64>.tar.gz` は、
+GitHub Releases の `php-ebpf-tracer-<version>-linux-amd64.tar.gz` は、
 libbpf / libelf / zlib / zstd / musl まで静的リンクした単一バイナリです。BPF
 プログラムも埋め込んであるので、展開したバイナリだけでどのディストリビューションでも動きます。
 
@@ -123,12 +123,12 @@ make LIBBPF_BUNDLED=1                   # build/libbpf に libbpf.a を作って
 ```
 
 リリースと同じ静的バイナリは Docker (buildx) で作れます。Alpine (musl) のコンテナで
-テストまで実行し、`dist/` にアーカイブを出力します。ホストと異なるアーキテクチャは
-QEMU で動かすので時間がかかります。
+テストまで実行し、`dist/` にアーカイブを出力します。リリースは amd64 だけですが、
+arm64 もビルドできます (ホストと異なるアーキテクチャは QEMU で動くので時間がかかります)。
 
 ```sh
-make release                            # linux/amd64 と linux/arm64
-make release PLATFORMS=linux/amd64      # 片方だけ
+make release                            # linux/amd64
+make release PLATFORMS=linux/arm64      # arm64 を作る場合
 ```
 
 開発中に BPF プログラムだけ差し替えたいときは `-bpf-object path/to/php_tracer.bpf.o`

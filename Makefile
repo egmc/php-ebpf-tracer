@@ -102,9 +102,9 @@ test: $(BPF_EMBED) | $(LIBBPF_DEP)
 dist: all
 	scripts/dist.sh $(VERSION) $(BIN)
 
-# Static release builds for amd64 and arm64, in containers. Needs docker
-# buildx; the architecture that differs from the host's runs under QEMU.
-PLATFORMS ?= linux/amd64,linux/arm64
+# Static release build in a container; needs docker buildx. Only amd64 is
+# released, but PLATFORMS=linux/arm64 works too (under QEMU on an amd64 host).
+PLATFORMS ?= linux/amd64
 release:
 	docker buildx build -f docker/release.Dockerfile --platform $(PLATFORMS) \
 		--build-arg VERSION=$(VERSION) --output type=local,dest=dist .

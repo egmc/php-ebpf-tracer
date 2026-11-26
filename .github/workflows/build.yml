@@ -30,25 +30,32 @@ jobs:
       matrix:
         arch: [amd64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: true
           fetch-depth: 0 # git describe needs the tags
+          # Nothing here pushes; do not leave the token in .git/config.
+          persist-credentials: false
 
       - name: Version
         id: version
         run: echo "version=$(git describe --tags --always --dirty)" >>"$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # Builds, runs the tests and packages, all inside docker/release.Dockerfile.
+      # Values go through env rather than ${{ }} in the script, so they can
+      # never be read as shell syntax.
       - name: Build, test and package
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: >-
           docker buildx build -f docker/release.Dockerfile
-          --platform linux/${{ matrix.arch }}
-          --build-arg VERSION=${{ steps.version.outputs.version }}
-          --cache-from type=gha,scope=${{ matrix.arch }}
-          --cache-to type=gha,mode=max,scope=${{ matrix.arch }}
+          --platform "linux/$ARCH"
+          --build-arg "VERSION=$VERSION"
+          --cache-from "type=gha,scope=$ARCH"
+          --cache-to "type=gha,mode=max,scope=$ARCH"
           --output type=local,dest=dist .
 
       # The binary was built against musl; make sure it also runs on the
@@ -62,7 +69,7 @@ jobs:
           if ldd "$bin"; then echo "dynamically linked" >&2; exit 1; fi
           "$bin" -version
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-${{ matrix.arch }}
           path: dist/
@@ -75,7 +82,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: dist-*
           path: dist

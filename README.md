@@ -87,13 +87,26 @@ PHP バイナリは named volume 経由で共有し、PHP プロセスもトレ�
 **同じ inode** を参照するようにしています。uprobe は inode に対して張られるため、
 コンテナごとに overlayfs のコピーを持つと probe が当たりません。
 
+## インストール (リリースバイナリ)
+
+GitHub Releases の `php-ebpf-tracer-<version>-linux-amd64.tar.gz` は、
+libbpf / libelf / zlib / zstd / musl まで静的リンクした単一バイナリです。BPF
+プログラムも埋め込んであるので、展開したバイナリだけでどのディストリビューションでも動きます。
+
+```sh
+tar -xzf php-ebpf-tracer-v0.1.0-linux-amd64.tar.gz
+sudo ./php-ebpf-tracer-v0.1.0-linux-amd64/php-ebpf-tracer -binary "$(which php-fpm)" ...
+```
+
 ## 手動ビルド (Linux)
+
+BPF オブジェクトはビルド時にバイナリへ埋め込まれます (`internal/bpfobj`)。そのため
+Go 部分も `go build` ではなく `make` でビルドしてください。
 
 ```sh
 # 必要: clang, llvm, libbpf >= 1.5 (ヘッダ + ライブラリ), libelf, zlib, Go 1.24+
-make                                    # build/php_tracer.bpf.o と build/php-ebpf-tracer
+make                                    # build/php-ebpf-tracer
 sudo ./build/php-ebpf-tracer \
-    -bpf-object build/php_tracer.bpf.o \
     -binary "$(which php)" \
     -service-name my-php-app \
     -min-duration 100ms \
@@ -108,6 +121,18 @@ sudo ./build/php-ebpf-tracer \
 git submodule update --init             # 未取得なら make が自動で実行します
 make LIBBPF_BUNDLED=1                   # build/libbpf に libbpf.a を作ってから全体をビルド
 ```
+
+リリースと同じ静的バイナリは Docker (buildx) で作れます。Alpine (musl) のコンテナで
+テストまで実行し、`dist/` にアーカイブを出力します。リリースは amd64 だけですが、
+arm64 もビルドできます (ホストと異なるアーキテクチャは QEMU で動くので時間がかかります)。
+
+```sh
+make release                            # linux/amd64
+make release PLATFORMS=linux/arm64      # arm64 を作る場合
+```
+
+開発中に BPF プログラムだけ差し替えたいときは `-bpf-object path/to/php_tracer.bpf.o`
+で埋め込み版の代わりにファイルを読み込めます。
 
 Collector を立てずに中身を確認したいときは `-otlp-protocol stdout` を使います。
 
@@ -311,13 +336,16 @@ entry 側で文字列をコピーするのは、関数名が `main` かどうか
 bpf/php_tracer.h        BPF と Go で共有するレコードのワイヤフォーマット定義
 bpf/php_tracer.bpf.c    USDT プローブ + シャドウスタック + ring buffer
 internal/event/         ring buffer レコードのデコード (cgo なし)
+internal/bpfobj/        ビルドした BPF オブジェクトの埋め込み (make がコピーする)
 internal/bpftracer/     libbpfgo でのロード・アタッチ・ポーリング
 internal/pipeline/      リクエスト単位のバッファリングと閾値判定
 internal/otelexport/    OTel スパン組み立てと OTLP 送信
 internal/mysqlnd/       mysqlnd のメソッドテーブルから uprobe の位置を求める (cgo なし)
 internal/monoclock/     CLOCK_MONOTONIC → 壁時計の変換
 cmd/php-ebpf-tracer/    CLI
-docker/                 PHP (dtrace 有効) とトレーサのイメージ
+docker/                 PHP (dtrace 有効) とトレーサのイメージ、静的リリースビルド (release.Dockerfile)
+scripts/dist.sh         リリースアーカイブの作成 (サードパーティのライセンスと libelf のソースを同梱)
+LICENSES/               BPF プログラムのライセンス本文と Apache-2.0
 examples/               デモアプリと負荷生成スクリプト
 ```
 
@@ -348,3 +376,26 @@ docker compose logs -f tracer | grep msg=stats
 # Jaeger に届いているか
 curl -s 'http://localhost:16686/api/services'
 ```
+
+## ライセンス
+
+- Go のコード、ドキュメントなど: [Apache License 2.0](LICENSE)
+- BPF プログラム (`bpf/`): `GPL-2.0-only OR BSD-2-Clause` のデュアルライセンス
+  ([GPL-2.0](LICENSES/GPL-2.0-only.txt), [BSD-2-Clause](LICENSES/BSD-2-Clause.txt))。
+  カーネルに対しては GPL 互換の `Dual BSD/GPL` を宣言しています。
+
+リリースバイナリにはサードパーティのライブラリが静的リンクされています。
+各ライセンスはアーカイブ内の `THIRD_PARTY_LICENSES/` に同梱しています。
+
+| コンポーネント | ライセンス |
+| --- | --- |
+| Go 標準ライブラリと Go モジュール (OpenTelemetry, libbpfgo, gRPC など) | Apache-2.0 / BSD-3-Clause / MIT |
+| libbpf | BSD-2-Clause (`LGPL-2.1 OR BSD-2-Clause` から選択) |
+| libelf (elfutils) | LGPL-3.0-or-later (`LGPL-3.0-or-later OR GPL-2.0-or-later` から選択) |
+| zlib | Zlib |
+| zstd | BSD-3-Clause (`BSD-3-Clause OR GPL-2.0-only` から選択) |
+| musl | MIT |
+
+libelf は LGPL に従い、ビルドに使った elfutils のソースと Alpine のパッチを
+リリースの `sources/` に添付しています。本プロジェクトのソースとビルド手順
+(`make release`) も公開しているので、別の libelf と再リンクできます。

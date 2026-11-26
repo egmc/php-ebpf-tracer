@@ -61,7 +61,9 @@ const (
 
 // Config configures the eBPF side of the tracer.
 type Config struct {
-	// ObjectPath is the compiled php_tracer.bpf.o.
+	// Object is the compiled php_tracer.bpf.o, normally the copy embedded in
+	// the binary. ObjectPath, when set, loads it from a file instead.
+	Object     []byte
 	ObjectPath string
 	// Binaries are the PHP executables (or shared objects) carrying the USDT
 	// notes, e.g. /usr/local/bin/php and /usr/local/sbin/php-fpm.
@@ -146,16 +148,16 @@ func New(cfg Config) (*Tracer, error) {
 		return nil, err
 	}
 
-	if cfg.ObjectPath == "" {
-		return nil, errors.New("bpftracer: ObjectPath is required")
+	if cfg.ObjectPath == "" && len(cfg.Object) == 0 {
+		return nil, errors.New("bpftracer: Object or ObjectPath is required")
 	}
 	if len(cfg.Binaries) == 0 {
 		return nil, errors.New("bpftracer: at least one binary to attach to is required")
 	}
 
-	module, err := bpf.NewModuleFromFile(cfg.ObjectPath)
+	module, err := openModule(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("open BPF object %s: %w", cfg.ObjectPath, err)
+		return nil, err
 	}
 
 	t := &Tracer{
@@ -174,6 +176,23 @@ func New(cfg Config) (*Tracer, error) {
 	}
 
 	return t, nil
+}
+
+func openModule(cfg Config) (*bpf.Module, error) {
+	if cfg.ObjectPath != "" {
+		module, err := bpf.NewModuleFromFile(cfg.ObjectPath)
+		if err != nil {
+			return nil, fmt.Errorf("open BPF object %s: %w", cfg.ObjectPath, err)
+		}
+		return module, nil
+	}
+
+	module, err := bpf.NewModuleFromBuffer(cfg.Object, "php_tracer.bpf.o")
+	if err != nil {
+		return nil, fmt.Errorf("open embedded BPF object: %w", err)
+	}
+
+	return module, nil
 }
 
 func (t *Tracer) load() error {

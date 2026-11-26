@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
+/* Copyright (c) 2026 egmc */
 /*
  * Wire format shared between the eBPF program (bpf/php_tracer.bpf.c) and the
  * Go decoder (internal/bpftracer/event.go).

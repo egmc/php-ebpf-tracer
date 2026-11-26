@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/egmc/php-ebpf-tracer/internal/bpfobj"
 	"github.com/egmc/php-ebpf-tracer/internal/bpftracer"
 	"github.com/egmc/php-ebpf-tracer/internal/event"
 	"github.com/egmc/php-ebpf-tracer/internal/monoclock"
@@ -56,11 +57,15 @@ func dirPrefixes(s stringList) stringList {
 	return out
 }
 
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 type options struct {
-	bpfObject string
-	binaries  stringList
-	provider  string
-	pid       int
+	bpfObject   string
+	showVersion bool
+	binaries    stringList
+	provider    string
+	pid         int
 
 	attachMode   string
 	scanInterval time.Duration
@@ -108,8 +113,9 @@ func main() {
 func parseFlags() *options {
 	o := &options{}
 
-	flag.StringVar(&o.bpfObject, "bpf-object", envOr("PHP_TRACER_BPF_OBJECT", "build/php_tracer.bpf.o"),
-		"path to the compiled php_tracer.bpf.o")
+	flag.StringVar(&o.bpfObject, "bpf-object", os.Getenv("PHP_TRACER_BPF_OBJECT"),
+		"load the BPF program from this php_tracer.bpf.o instead of the copy built into the binary")
+	flag.BoolVar(&o.showVersion, "version", false, "print the version and exit")
 	flag.Var(&o.binaries, "binary",
 		"PHP executable carrying the USDT notes; repeatable (default /usr/local/bin/php)")
 	flag.StringVar(&o.provider, "provider", "php", "USDT provider name")
@@ -209,6 +215,10 @@ func flagSet(name string) bool {
 
 func run() error {
 	o := parseFlags()
+	if o.showVersion {
+		fmt.Println("php-ebpf-tracer", version)
+		return nil
+	}
 
 	log, err := newLogger(o.logLevel)
 	if err != nil {
@@ -273,6 +283,7 @@ func run() error {
 	}
 
 	tracer, err := bpftracer.New(bpftracer.Config{
+		Object:          bpfobj.Object,
 		ObjectPath:      o.bpfObject,
 		Binaries:        o.binaries,
 		Provider:        o.provider,

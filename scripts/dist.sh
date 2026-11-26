@@ -22,8 +22,19 @@ root=dist/$name
 lic=$root/THIRD_PARTY_LICENSES
 src=dist/sources
 
+# fetch OUT URL... downloads the first URL that works. Some upstream sites
+# turn away requests from CI networks, so mirrors come first.
 fetch() {
-	curl -fsSL --retry 3 -o "$2" "$1"
+	out=$1
+	shift
+	for url; do
+		if curl -fsSL --retry 3 -o "$out" "$url"; then
+			return 0
+		fi
+		echo "dist.sh: could not fetch $url" >&2
+	done
+	rm -f "$out"
+	return 1
 }
 
 rm -rf "$root" "$root.tar.gz"
@@ -79,17 +90,35 @@ echo "libbpf            $v (git submodule)   BSD-2-Clause (of LGPL-2.1 OR BSD-2-
 # LGPL-3.0-or-later. Its source goes into dist/sources.
 v=$(pkg-config --modversion libelf)
 tarball=elfutils-$v.tar.bz2
-[ -f "$src/$tarball" ] || fetch "https://sourceware.org/elfutils/ftp/$v/$tarball" "$src/$tarball"
+alpine=
+[ -f /etc/alpine-release ] && alpine=$(cut -d. -f1,2 /etc/alpine-release)
+[ -f "$src/$tarball" ] || fetch "$src/$tarball" \
+	${alpine:+"https://distfiles.alpinelinux.org/distfiles/v$alpine/$tarball"} \
+	"https://sourceware.org/elfutils/ftp/$v/$tarball"
 tmp=$(mktemp -d)
 tar -xjf "$src/$tarball" -C "$tmp" "elfutils-$v/COPYING" "elfutils-$v/COPYING-LGPLV3" "elfutils-$v/COPYING-GPLV2"
 mkdir -p "$lic/elfutils"
 cp "$tmp/elfutils-$v"/COPYING* "$lic/elfutils/"
 rm -rf "$tmp"
-if [ -f /etc/alpine-release ]; then
-	branch=$(cut -d. -f1,2 /etc/alpine-release)-stable
+if [ -n "$alpine" ]; then
+	# The Alpine packaging libelf was built from: APKBUILD and its patches,
+	# from the GitHub mirror of aports.
+	branch=$alpine-stable
 	aports=alpine-aports-$branch-main-elfutils.tar.gz
-	[ -f "$src/$aports" ] ||
-		fetch "https://gitlab.alpinelinux.org/alpine/aports/-/archive/$branch/aports-$branch.tar.gz?path=main/elfutils" "$src/$aports"
+	if [ ! -f "$src/$aports" ]; then
+		tmp=$(mktemp -d)
+		dir=$tmp/aports-$branch-main-elfutils
+		base=https://raw.githubusercontent.com/alpinelinux/aports/$branch/main/elfutils
+		mkdir -p "$dir"
+		fetch "$dir/APKBUILD" "$base/APKBUILD"
+		# Local files are the source= entries that are not URLs.
+		for f in $(sed -n '/^source="/,/"/p' "$dir/APKBUILD" | sed 's/^source=//' | tr -d '"' |
+			tr ' \t' '\n\n' | grep -v -e '://' -e '^$'); do
+			fetch "$dir/$f" "$base/$f"
+		done
+		tar -czf "$src/$aports" -C "$tmp" "aports-$branch-main-elfutils"
+		rm -rf "$tmp"
+	fi
 fi
 echo "elfutils (libelf) $v   LGPL-3.0-or-later (of LGPL-3.0-or-later OR GPL-2.0-or-later); source in sources/ of the release" >>"$summary"
 
@@ -104,14 +133,20 @@ echo "zlib              $v   Zlib" >>"$summary"
 if pkg-config --static --libs libelf | grep -q -- -lzstd; then
 	v=$(pkg-config --modversion libzstd)
 	mkdir -p "$lic/zstd"
-	fetch "https://raw.githubusercontent.com/facebook/zstd/v$v/LICENSE" "$lic/zstd/LICENSE"
+	fetch "$lic/zstd/LICENSE" "https://raw.githubusercontent.com/facebook/zstd/v$v/LICENSE"
 	echo "zstd              $v   BSD-3-Clause (of BSD-3-Clause OR GPL-2.0-only)" >>"$summary"
 fi
 
 # musl: MIT.
 if v=$(apk list -I musl 2>/dev/null | sed -n 's/^musl-\([0-9.]*\)-r.*/\1/p') && [ -n "$v" ]; then
 	mkdir -p "$lic/musl"
-	fetch "https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v$v" "$lic/musl/COPYRIGHT"
+	tmp=$(mktemp -d)
+	fetch "$tmp/musl.tar.gz" \
+		${alpine:+"https://distfiles.alpinelinux.org/distfiles/v$alpine/musl-$v.tar.gz"} \
+		"https://musl.libc.org/releases/musl-$v.tar.gz"
+	tar -xzf "$tmp/musl.tar.gz" -C "$tmp" "musl-$v/COPYRIGHT"
+	cp "$tmp/musl-$v/COPYRIGHT" "$lic/musl/"
+	rm -rf "$tmp"
 	echo "musl              $v   MIT" >>"$summary"
 fi
 

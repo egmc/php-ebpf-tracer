@@ -87,38 +87,68 @@ v=$(awk '/define LIBBPF_MAJOR_VERSION/ {ma = $3} /define LIBBPF_MINOR_VERSION/ {
 echo "libbpf            $v (git submodule)   BSD-2-Clause (of LGPL-2.1 OR BSD-2-Clause)" >>"$summary"
 
 # libelf (elfutils): LGPL-3.0-or-later OR GPL-2.0-or-later, used under the
-# LGPL-3.0-or-later. Its source goes into dist/sources.
+# LGPL-3.0-or-later. Its source goes into dist/sources: the upstream release
+# and, on Alpine, the packaging (APKBUILD and patches) libelf was built from.
+# Everything downloaded is checked against the sha512sums of that APKBUILD
+# before it is published.
 v=$(pkg-config --modversion libelf)
 tarball=elfutils-$v.tar.bz2
 alpine=
 [ -f /etc/alpine-release ] && alpine=$(cut -d. -f1,2 /etc/alpine-release)
+
+pkg=
+if [ -n "$alpine" ]; then
+	branch=$alpine-stable
+	aports=alpine-aports-$branch-main-elfutils.tar.gz
+	pkgtmp=$(mktemp -d)
+	pkg=$pkgtmp/aports-$branch-main-elfutils
+	base=https://raw.githubusercontent.com/alpinelinux/aports/$branch/main/elfutils
+	mkdir -p "$pkg"
+	fetch "$pkg/APKBUILD" "$base/APKBUILD"
+	pkgver=$(sed -n 's/^pkgver=//p' "$pkg/APKBUILD")
+	if [ "$pkgver" != "$v" ]; then
+		echo "dist.sh: aports $branch has elfutils $pkgver, but $v is installed" >&2
+		exit 1
+	fi
+fi
+
+# verify FILE NAME checks FILE against the APKBUILD checksum listed for NAME.
+verify() {
+	[ -n "$pkg" ] || return 0
+	want=$(sed -n '/^sha512sums="/,/"/p' "$pkg/APKBUILD" | tr -d '"' |
+		awk -v n="$2" '$2 == n {print $1}')
+	if [ -z "$want" ]; then
+		echo "dist.sh: no checksum for $2 in the APKBUILD" >&2
+		exit 1
+	fi
+	got=$(sha512sum "$1" | cut -d' ' -f1)
+	if [ "$got" != "$want" ]; then
+		echo "dist.sh: checksum mismatch for $2" >&2
+		exit 1
+	fi
+}
+
 [ -f "$src/$tarball" ] || fetch "$src/$tarball" \
 	${alpine:+"https://distfiles.alpinelinux.org/distfiles/v$alpine/$tarball"} \
 	"https://sourceware.org/elfutils/ftp/$v/$tarball"
+verify "$src/$tarball" "$tarball"
+[ -n "$pkg" ] || echo "dist.sh: not on Alpine, $tarball is not verified" >&2
+
 tmp=$(mktemp -d)
 tar -xjf "$src/$tarball" -C "$tmp" "elfutils-$v/COPYING" "elfutils-$v/COPYING-LGPLV3" "elfutils-$v/COPYING-GPLV2"
 mkdir -p "$lic/elfutils"
 cp "$tmp/elfutils-$v"/COPYING* "$lic/elfutils/"
 rm -rf "$tmp"
-if [ -n "$alpine" ]; then
-	# The Alpine packaging libelf was built from: APKBUILD and its patches,
-	# from the GitHub mirror of aports.
-	branch=$alpine-stable
-	aports=alpine-aports-$branch-main-elfutils.tar.gz
-	if [ ! -f "$src/$aports" ]; then
-		tmp=$(mktemp -d)
-		dir=$tmp/aports-$branch-main-elfutils
-		base=https://raw.githubusercontent.com/alpinelinux/aports/$branch/main/elfutils
-		mkdir -p "$dir"
-		fetch "$dir/APKBUILD" "$base/APKBUILD"
-		# Local files are the source= entries that are not URLs.
-		for f in $(sed -n '/^source="/,/"/p' "$dir/APKBUILD" | sed 's/^source=//' | tr -d '"' |
-			tr ' \t' '\n\n' | grep -v -e '://' -e '^$'); do
-			fetch "$dir/$f" "$base/$f"
-		done
-		tar -czf "$src/$aports" -C "$tmp" "aports-$branch-main-elfutils"
-		rm -rf "$tmp"
-	fi
+
+if [ -n "$pkg" ]; then
+	# Local files are the source= entries that are not URLs.
+	for f in $(sed -n '/^source="/,/"/p' "$pkg/APKBUILD" | sed 's/^source=//' | tr -d '"' |
+		tr ' \t' '\n\n' | grep -v -e '://' -e '^$'); do
+		fetch "$pkg/$f" "$base/$f"
+		verify "$pkg/$f" "$f"
+	done
+	tar -czf "$src/$aports" -C "$pkgtmp" "aports-$branch-main-elfutils"
+	rm -rf "$pkgtmp"
 fi
 echo "elfutils (libelf) $v   LGPL-3.0-or-later (of LGPL-3.0-or-later OR GPL-2.0-or-later); source in sources/ of the release" >>"$summary"
 

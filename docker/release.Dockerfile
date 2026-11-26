@@ -1,13 +1,14 @@
-# syntax=docker/dockerfile:1
+# No syntax directive: BuildKit's built-in frontend handles RUN --mount, and
+# the build then pulls no frontend image from the registry.
 #
 # Static release build. musl lets everything, libc included, be linked
 # statically, so the binary runs on any Linux distribution. `make release`
 # drives it; the archives land in dist/<os>_<arch>/.
 #
-ARG GO_VERSION=1.25
-ARG ALPINE_VERSION=3.22
-
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS build
+# The image is pinned by digest, as whatever it contains ends up in the
+# released binary; Dependabot keeps the digest current. scripts/dist.sh takes
+# the Alpine version, which selects the packaging it publishes, from the image.
+FROM golang:1.25-alpine3.22@sha256:65b4400aee0927412e9ed791a11893273a49d55df24841f7599660fb80dae464 AS build
 
 RUN apk add --no-cache \
         build-base clang llvm linux-headers pkgconf \

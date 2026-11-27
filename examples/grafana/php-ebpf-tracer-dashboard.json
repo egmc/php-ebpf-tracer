@@ -1,0 +1,1328 @@
+{
+  "apiVersion": "dashboard.grafana.app/v1beta1",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "php-ebpf-tracer",
+    "annotations": {
+      "grafana.app/folder": "php-ebpf-tracer"
+    }
+  },
+  "spec": {
+    "title": "PHP eBPF Tracer",
+    "description": "php-ebpf-tracer が送信した OTLP トレースを Tempo の TraceQL metrics で集計。このトレーサはテールサンプリングで `-min-duration` 以上のリクエストだけを送信します。ここの件数・レイテンシは「送信された (遅い) リクエスト」の統計で、全トラフィックではありません。",
+    "tags": [
+      "php",
+      "ebpf",
+      "tempo",
+      "gcx"
+    ],
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "editable": true,
+    "graphTooltip": 1,
+    "refresh": "",
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "links": [
+      {
+        "title": "php-ebpf-tracer",
+        "type": "link",
+        "url": "https://github.com/egmc/php-ebpf-tracer",
+        "targetBlank": true,
+        "icon": "external link"
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "datasource",
+          "label": "Tempo",
+          "type": "datasource",
+          "query": "tempo",
+          "current": {
+            "text": "grafanacloud-egmc-traces",
+            "value": "grafanacloud-traces"
+          },
+          "hide": 0
+        },
+        {
+          "name": "service",
+          "label": "service.name",
+          "type": "query",
+          "datasource": {
+            "type": "tempo",
+            "uid": "${datasource}"
+          },
+          "query": {
+            "type": 1,
+            "label": "resource.service.name",
+            "refId": "service",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" }"
+          },
+          "refresh": 2,
+          "sort": 1,
+          "includeAll": false,
+          "multi": false,
+          "current": {
+            "text": "junsatsuma",
+            "value": "junsatsuma"
+          }
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "type": "row",
+        "title": "概要 (送信されたリクエスト)",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 0,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 2,
+        "type": "stat",
+        "title": "送信リクエスト数",
+        "description": "選択期間に送信されたリクエストスパンの件数。このトレーサはテールサンプリングで `-min-duration` 以上のリクエストだけを送信します。ここの件数・レイテンシは「送信された (遅い) リクエスト」の統計で、全トラフィックではありません。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 1,
+          "w": 4,
+          "h": 4
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server } | count_over_time()",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "text",
+                  "value": null
+                }
+              ]
+            },
+            "color": {
+              "mode": "thresholds"
+            },
+            "decimals": 0
+          },
+          "overrides": []
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "justifyMode": "center"
+        }
+      },
+      {
+        "id": 3,
+        "type": "stat",
+        "title": "送信リクエスト / 秒",
+        "description": "選択期間の平均。このトレーサはテールサンプリングで `-min-duration` 以上のリクエストだけを送信します。ここの件数・レイテンシは「送信された (遅い) リクエスト」の統計で、全トラフィックではありません。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 4,
+          "y": 1,
+          "w": 4,
+          "h": 4
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server } | rate()",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "text",
+                  "value": null
+                }
+              ]
+            },
+            "color": {
+              "mode": "thresholds"
+            },
+            "decimals": 3
+          },
+          "overrides": []
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "justifyMode": "center"
+        }
+      },
+      {
+        "id": 4,
+        "type": "stat",
+        "title": "p50 リクエスト時間",
+        "description": "送信されたリクエストスパンの中央値。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 8,
+          "y": 1,
+          "w": 4,
+          "h": 4
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server } | quantile_over_time(duration, .5)",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "text",
+                  "value": null
+                }
+              ]
+            },
+            "color": {
+              "mode": "thresholds"
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "justifyMode": "center"
+        }
+      },
+      {
+        "id": 5,
+        "type": "stat",
+        "title": "p95 リクエスト時間",
+        "description": "送信されたリクエストスパンの p95。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 1,
+          "w": 4,
+          "h": 4
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server } | quantile_over_time(duration, .95)",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "orange",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 3
+                }
+              ]
+            },
+            "color": {
+              "mode": "thresholds"
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "justifyMode": "center"
+        }
+      },
+      {
+        "id": 6,
+        "type": "stat",
+        "title": "エラー率",
+        "description": "status=error のリクエストスパンの割合 (送信分のみ)。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 16,
+          "y": 1,
+          "w": 4,
+          "h": 4
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "100 * ({ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server && status = error } | rate()) / ({ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server } | rate())",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "orange",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            },
+            "color": {
+              "mode": "thresholds"
+            },
+            "decimals": 2
+          },
+          "overrides": []
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "justifyMode": "center"
+        }
+      },
+      {
+        "id": 7,
+        "type": "stat",
+        "title": "平均スパン数 / リクエスト",
+        "description": "リクエストスパンの php.spans.count の平均。-max-spans (既定 5000) に近いと切り捨てが起きます。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 20,
+          "y": 1,
+          "w": 4,
+          "h": 4
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server } | avg_over_time(span.php.spans.count)",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "text",
+                  "value": null
+                }
+              ]
+            },
+            "color": {
+              "mode": "thresholds"
+            },
+            "decimals": 0
+          },
+          "overrides": []
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "justifyMode": "center"
+        }
+      },
+      {
+        "id": 8,
+        "type": "timeseries",
+        "title": "リクエスト / 秒 (ルート別)",
+        "description": "リクエストスパン名 (`METHOD /path`) ごとの送信レート。このトレーサはテールサンプリングで `-min-duration` 以上のリクエストだけを送信します。ここの件数・レイテンシは「送信された (遅い) リクエスト」の統計で、全トラフィックではありません。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 5,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server } | rate() by (name)",
+            "metricsQueryType": "range"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "custom": {
+              "drawStyle": "bars",
+              "lineWidth": 0,
+              "fillOpacity": 60,
+              "showPoints": "never",
+              "spanNulls": true,
+              "stacking": {
+                "mode": "normal"
+              }
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "calcs": [
+              "mean",
+              "max"
+            ],
+            "sortBy": "Max",
+            "sortDesc": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        }
+      },
+      {
+        "id": 9,
+        "type": "timeseries",
+        "title": "リクエスト時間 p50 / p95 / p99",
+        "description": "送信されたリクエストスパンの分位点。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 5,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server } | quantile_over_time(duration, .5, .95, .99)",
+            "metricsQueryType": "range"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "custom": {
+              "drawStyle": "line",
+              "lineWidth": 1,
+              "fillOpacity": 8,
+              "showPoints": "never",
+              "spanNulls": true
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom"
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "interval": "5m",
+        "transformations": [
+          {
+            "id": "renameByRegex",
+            "options": {
+              "regex": "\\{p=([0-9.]+)\\}",
+              "renamePattern": "p$1"
+            }
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "type": "timeseries",
+        "title": "p95 リクエスト時間 (URL パス別)",
+        "description": "url.path ごとの p95。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 13,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server } | quantile_over_time(duration, .95) by (span.url.path)",
+            "metricsQueryType": "range"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "custom": {
+              "drawStyle": "line",
+              "lineWidth": 1,
+              "fillOpacity": 8,
+              "showPoints": "never",
+              "spanNulls": true
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "calcs": [
+              "mean",
+              "max"
+            ],
+            "sortBy": "Max",
+            "sortDesc": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "interval": "5m",
+        "transformations": [
+          {
+            "id": "renameByRegex",
+            "options": {
+              "regex": ".*span\\.url\\.path=\"(.*)\".*",
+              "renamePattern": "$1"
+            }
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "type": "timeseries",
+        "title": "エラー / 秒 (ルート別)",
+        "description": "status=error のリクエストスパン。何も無ければエラーは発生していません。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 13,
+          "w": 12,
+          "h": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server && status = error } | rate() by (name)",
+            "metricsQueryType": "range"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "custom": {
+              "drawStyle": "bars",
+              "lineWidth": 0,
+              "fillOpacity": 60,
+              "showPoints": "never",
+              "spanNulls": true,
+              "stacking": {
+                "mode": "normal"
+              }
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "calcs": [
+              "mean",
+              "max"
+            ],
+            "sortBy": "Max",
+            "sortDesc": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        }
+      },
+      {
+        "id": 12,
+        "type": "row",
+        "title": "PHP 関数",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 21,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 13,
+        "type": "bargauge",
+        "title": "合計時間の長い関数 Top 15",
+        "description": "選択期間で関数スパンの duration を合計した上位 (自己時間ではなく子を含む時間)。クラス名 (code.namespace) と関数名 (code.function) で集計。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 22,
+          "w": 12,
+          "h": 16
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = internal } | sum_over_time(duration) by (span.code.namespace, span.code.function) | topk(15)",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "continuous-BlYlRd"
+            },
+            "min": 0
+          },
+          "overrides": []
+        },
+        "options": {
+          "displayMode": "gradient",
+          "orientation": "horizontal",
+          "showUnfilled": true,
+          "valueMode": "text",
+          "namePlacement": "top",
+          "minVizHeight": 10,
+          "maxVizHeight": 18,
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          }
+        },
+        "transformations": [
+          {
+            "id": "renameByRegex",
+            "options": {
+              "regex": "\\{span\\.code\\.function=\"(.*)\", span\\.code\\.namespace=\"(.*)\"\\}",
+              "renamePattern": "$2::$1"
+            }
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "type": "bargauge",
+        "title": "合計時間の長いクラス Top 15",
+        "description": "code.namespace (クラス名) ごとの関数スパン合計時間。クラスに属さない関数は空になります。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 22,
+          "w": 12,
+          "h": 16
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = internal } | sum_over_time(duration) by (span.code.namespace) | topk(15)",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "continuous-BlYlRd"
+            },
+            "min": 0
+          },
+          "overrides": []
+        },
+        "options": {
+          "displayMode": "gradient",
+          "orientation": "horizontal",
+          "showUnfilled": true,
+          "valueMode": "text",
+          "namePlacement": "top",
+          "minVizHeight": 10,
+          "maxVizHeight": 18,
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          }
+        }
+      },
+      {
+        "id": 15,
+        "type": "bargauge",
+        "title": "呼び出し回数の多い関数 Top 15",
+        "description": "選択期間の関数スパン数。-min-span / -include-path で落としたものは含みません。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 38,
+          "w": 12,
+          "h": 16
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = internal } | count_over_time() by (span.code.namespace, span.code.function) | topk(15)",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "continuous-BlYlRd"
+            },
+            "min": 0
+          },
+          "overrides": []
+        },
+        "options": {
+          "displayMode": "gradient",
+          "orientation": "horizontal",
+          "showUnfilled": true,
+          "valueMode": "text",
+          "namePlacement": "top",
+          "minVizHeight": 10,
+          "maxVizHeight": 18,
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          }
+        },
+        "transformations": [
+          {
+            "id": "renameByRegex",
+            "options": {
+              "regex": "\\{span\\.code\\.function=\"(.*)\", span\\.code\\.namespace=\"(.*)\"\\}",
+              "renamePattern": "$2::$1"
+            }
+          }
+        ]
+      },
+      {
+        "id": 16,
+        "type": "timeseries",
+        "title": "関数スパン / 秒 と 深さ",
+        "description": "送信された関数スパンのレートと、php.call.depth の最大値。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 38,
+          "w": 12,
+          "h": 16
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = internal } | rate()",
+            "metricsQueryType": "range"
+          },
+          {
+            "refId": "B",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = internal } | max_over_time(span.php.call.depth)",
+            "metricsQueryType": "range"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "custom": {
+              "drawStyle": "line",
+              "lineWidth": 1,
+              "fillOpacity": 8,
+              "showPoints": "never",
+              "spanNulls": true
+            }
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "max_over_time"
+              },
+              "properties": [
+                {
+                  "id": "custom.axisPlacement",
+                  "value": "right"
+                },
+                {
+                  "id": "displayName",
+                  "value": "最大呼び出し深さ"
+                },
+                {
+                  "id": "custom.lineStyle",
+                  "value": {
+                    "fill": "dash",
+                    "dash": [
+                      6,
+                      4
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "rate"
+              },
+              "properties": [
+                {
+                  "id": "displayName",
+                  "value": "関数スパン / 秒"
+                },
+                {
+                  "id": "unit",
+                  "value": "ops"
+                }
+              ]
+            }
+          ]
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom"
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        }
+      },
+      {
+        "id": 17,
+        "type": "row",
+        "title": "MySQL (-trace-mysql)",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 54,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 18,
+        "type": "timeseries",
+        "title": "クエリ / 秒 (操作別)",
+        "description": "mysqlnd の uprobe で取ったクエリスパン (kind=client)。-trace-mysql 無効なら空です。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 55,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = client && span.db.system.name = \"mysql\" } | rate() by (span.db.operation.name)",
+            "metricsQueryType": "range"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "custom": {
+              "drawStyle": "bars",
+              "lineWidth": 0,
+              "fillOpacity": 60,
+              "showPoints": "never",
+              "spanNulls": true,
+              "stacking": {
+                "mode": "normal"
+              }
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "calcs": [
+              "mean",
+              "max"
+            ],
+            "sortBy": "Max",
+            "sortDesc": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        }
+      },
+      {
+        "id": 19,
+        "type": "timeseries",
+        "title": "p95 クエリ時間 (操作別)",
+        "description": "結果ヘッダ受信までの時間で、行の fetch は含みません。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 8,
+          "y": 55,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = client && span.db.system.name = \"mysql\" } | quantile_over_time(duration, .95) by (span.db.operation.name)",
+            "metricsQueryType": "range"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "custom": {
+              "drawStyle": "line",
+              "lineWidth": 1,
+              "fillOpacity": 8,
+              "showPoints": "never",
+              "spanNulls": true
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "calcs": [
+              "mean",
+              "max"
+            ],
+            "sortBy": "Max",
+            "sortDesc": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "interval": "5m",
+        "transformations": [
+          {
+            "id": "renameByRegex",
+            "options": {
+              "regex": ".*span\\.db\\.operation\\.name=\"(.*)\".*",
+              "renamePattern": "$1"
+            }
+          }
+        ]
+      },
+      {
+        "id": 20,
+        "type": "timeseries",
+        "title": "クエリエラー / 秒",
+        "description": "mysqlnd が失敗を返したクエリ。何も無ければエラーは発生していません。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 16,
+          "y": 55,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = client && span.db.system.name = \"mysql\" && status = error } | rate() by (span.db.operation.name)",
+            "metricsQueryType": "range"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "custom": {
+              "drawStyle": "bars",
+              "lineWidth": 0,
+              "fillOpacity": 60,
+              "showPoints": "never",
+              "spanNulls": true,
+              "stacking": {
+                "mode": "normal"
+              }
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "calcs": [
+              "mean",
+              "max"
+            ],
+            "sortBy": "Max",
+            "sortDesc": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        }
+      },
+      {
+        "id": 21,
+        "type": "bargauge",
+        "title": "合計時間の長いクエリ Top 10",
+        "description": "db.query.text ごとの合計時間 (既定ではリテラルは ? に正規化済み)。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 63,
+          "w": 24,
+          "h": 12
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = client && span.db.system.name = \"mysql\" } | sum_over_time(duration) by (span.db.query.text) | topk(10)",
+            "metricsQueryType": "instant"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "continuous-BlYlRd"
+            },
+            "min": 0
+          },
+          "overrides": []
+        },
+        "options": {
+          "displayMode": "gradient",
+          "orientation": "horizontal",
+          "showUnfilled": true,
+          "valueMode": "text",
+          "namePlacement": "top",
+          "minVizHeight": 10,
+          "maxVizHeight": 18,
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          }
+        },
+        "transformations": [
+          {
+            "id": "renameByRegex",
+            "options": {
+              "regex": "^\\{span\\.db\\.query\\.text=\"(.*)\"\\}$",
+              "renamePattern": "$1"
+            }
+          }
+        ]
+      },
+      {
+        "id": 22,
+        "type": "row",
+        "title": "遅いトレース",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 75,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 23,
+        "type": "table",
+        "title": "遅いリクエストのトレース",
+        "description": "選択期間で時間の長いリクエスト。Trace ID をクリックするとトレースを開きます。",
+        "datasource": {
+          "type": "tempo",
+          "uid": "${datasource}"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 76,
+          "w": 24,
+          "h": 12
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "tempo",
+              "uid": "${datasource}"
+            },
+            "queryType": "traceql",
+            "tableType": "traces",
+            "limit": 50,
+            "query": "{ resource.telemetry.instrumentation.source = \"usdt-ebpf\" && resource.service.name = \"$service\" && kind = server && duration > 500ms }"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {},
+          "overrides": []
+        },
+        "options": {
+          "showHeader": true,
+          "sortBy": [
+            {
+              "displayName": "Duration",
+              "desc": true
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -4,7 +4,7 @@
 # the binary and libbpf comes from the git submodule, linked statically, so the
 # runtime image only needs libelf and its compression libraries.
 #
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         clang llvm libelf-dev zlib1g-dev make git pkg-config ca-certificates \

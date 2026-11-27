@@ -8,7 +8,7 @@
 # The image is pinned by digest, as whatever it contains ends up in the
 # released binary; Dependabot keeps the digest current. scripts/dist.sh takes
 # the Alpine version, which selects the packaging it publishes, from the image.
-FROM golang:1.25-alpine3.22@sha256:65b4400aee0927412e9ed791a11893273a49d55df24841f7599660fb80dae464 AS build
+FROM golang:1.26-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56 AS build
 
 RUN apk add --no-cache \
         build-base clang llvm linux-headers pkgconf \

@@ -115,7 +115,7 @@ BPF オブジェクトはビルド時にバイナリへ埋め込まれます (`i
 Go 部分も `go build` ではなく `make` でビルドしてください。
 
 ```sh
-# 必要: clang, llvm, libbpf >= 1.5 (ヘッダ + ライブラリ), libelf, zlib, Go 1.24+
+# 必要: clang, llvm, libbpf >= 1.5 (ヘッダ + ライブラリ), libelf, zlib, Go 1.25+
 make                                    # build/php-ebpf-tracer
 sudo ./build/php-ebpf-tracer \
     -binary "$(which php)" \
@@ -128,7 +128,7 @@ sudo ./build/php-ebpf-tracer \
 をビルドして静的リンクする `LIBBPF_BUNDLED=1` を指定します。
 
 ```sh
-# 必要: clang, llvm, libelf, zlib, Go 1.24+ (libbpf は不要)
+# 必要: clang, llvm, libelf, zlib, Go 1.25+ (libbpf は不要)
 git submodule update --init             # 未取得なら make が自動で実行します
 make LIBBPF_BUNDLED=1                   # build/libbpf に libbpf.a を作ってから全体をビルド
 ```

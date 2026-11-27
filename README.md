@@ -179,6 +179,19 @@ Basic 認証以外 (Bearer トークン、マルチテナントの `X-Scope-OrgI
 渡してください (`-otlp-header` / Basic 認証を指定すると環境変数のヘッダは
 上書きされます)。
 
+### Grafana ダッシュボード
+
+`examples/grafana/` に、Tempo の TraceQL metrics で集計するダッシュボードがあります
+(リクエストのレートとレイテンシ、時間のかかる PHP 関数とクラス、MySQL クエリ、遅いトレースの一覧)。
+gcx で、フォルダと一緒に作成できます。
+
+```sh
+gcx resources push -p examples/grafana
+```
+
+テールサンプリングのため、件数やレイテンシは `-min-duration` 以上で送信された
+リクエストの統計です。
+
 ## 主なオプション
 
 | フラグ | 既定値 | 説明 |
